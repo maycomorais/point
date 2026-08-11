@@ -1585,7 +1585,14 @@ async function imprimirPedido(id) {
     .replace(/=+$/, "");
 
   // Abre a janela de impressão
-  window.open(`imprimir.html?d=${base64}`, "Print", "width=420,height=700");
+  // Nome único por pedido — evita que o navegador/WebView reaproveite uma
+  // janela "Print" já aberta e reimprima dados travados de um pedido antigo
+  // (window.onload não roda de novo se só a query string muda na mesma janela)
+  window.open(
+    `imprimir.html?d=${base64}`,
+    `Print_${id}_${Date.now()}`,
+    "width=420,height=700",
+  );
 }
 
 // =========================================
@@ -1719,102 +1726,6 @@ async function carregarCozinha() {
 // =========================================
 // 6. FINANCEIRO
 // =========================================
-// ── Helpers de classificação financeira ────────────────────────────
-// Fonte ÚNICA da verdade sobre "qual foi o método de pagamento real de um
-// pedido". Usada pelo cálculo do Financeiro E por todas as
-// exportações/relatórios (CSV, XLSX, PDF), para que os números batam entre
-// a tela e qualquer relatório exportado.
-//
-// Por que isso é necessário: pedidos.forma_pagamento NÃO reflete o método
-// real em dois casos:
-//  - Nota quitada: forma_pagamento fica sempre "NaNota"; o método real
-//    escolhido na quitação fica em forma_pagamento_quitacao.
-//  - Multipagamento: forma_pagamento fica "Multipagamento"; os métodos e
-//    valores reais de cada parte ficam em obs_pagamento (JSON).
-function finClassificarMetodo(m) {
-  const s = (m || "").toLowerCase();
-  if (s.includes("pix")) return "pix";
-  if (s.includes("transfer")) return "transf";
-  if (s.includes("cartao") || s.includes("cartão")) return "cartao";
-  if (s.includes("efetivo") || s.includes("dinheiro")) return "efetivo";
-  if (s.includes("qr")) return "qr";
-  return "outro";
-}
-
-function finEhQuitado(p) {
-  return (p.obs_pagamento || "").toLowerCase().includes("[quitado");
-}
-
-function finPartesMultipagamento(p) {
-  try {
-    const partes = JSON.parse(p.obs_pagamento || "[]");
-    return Array.isArray(partes) ? partes : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-// Um pedido só é receita reconhecida quando o dinheiro já entrou de fato:
-// Nota não quitada ainda não recebeu nada, e vendas para Mensalista já
-// foram pagas antecipadamente na compra do plano (não contam de novo aqui).
-function finPedidoContaComoReceita(p) {
-  const pag = (p.forma_pagamento || "").toLowerCase();
-  if (pag === "mensalista") return false;
-  if (pag === "nanota" && !finEhQuitado(p)) return false;
-  return true;
-}
-
-// True se o pedido teve, de fato, alguma parte recebida no método-alvo.
-function finPedidoTemMetodo(p, bucketAlvo) {
-  const pag = (p.forma_pagamento || "").toLowerCase();
-  if (pag === "multipagamento") {
-    return finPartesMultipagamento(p).some((parte) => finClassificarMetodo(parte.metodo) === bucketAlvo);
-  }
-  if (pag === "nanota") {
-    if (!finEhQuitado(p)) return false;
-    return finClassificarMetodo(p.forma_pagamento_quitacao) === bucketAlvo;
-  }
-  return finClassificarMetodo(pag) === bucketAlvo;
-}
-
-// Valor do pedido atribuível a um método específico (para totalizações por
-// método em exportações). Para Multipagamento, soma só a(s) parte(s) daquele
-// método — não o pedido inteiro.
-function finValorNoMetodo(p, bucketAlvo) {
-  const pag = (p.forma_pagamento || "").toLowerCase();
-  const val = parseFloat(p.total_geral) || 0;
-  if (pag === "multipagamento") {
-    return finPartesMultipagamento(p)
-      .filter((parte) => finClassificarMetodo(parte.metodo) === bucketAlvo)
-      .reduce((a, parte) => a + (parseFloat(parte.valor) || 0), 0);
-  }
-  if (pag === "nanota") {
-    if (!finEhQuitado(p)) return 0;
-    return finClassificarMetodo(p.forma_pagamento_quitacao) === bucketAlvo ? val : 0;
-  }
-  return finClassificarMetodo(pag) === bucketAlvo ? val : 0;
-}
-
-// Texto legível da forma de pagamento efetivamente recebida — para colunas
-// de exportação/relatório (CSV, PDF), em vez do valor cru de forma_pagamento.
-function finFormaEfetivaLabel(p) {
-  const pag = (p.forma_pagamento || "").toLowerCase();
-  if (pag === "multipagamento") {
-    const partes = finPartesMultipagamento(p);
-    if (partes.length) {
-      return "Multi: " + partes.map((x) => `${x.metodo} (${Math.round(parseFloat(x.valor) || 0).toLocaleString("es-PY")})`).join(" + ");
-    }
-    return p.forma_pagamento || "";
-  }
-  if (pag === "nanota") {
-    if (finEhQuitado(p) && p.forma_pagamento_quitacao) {
-      return `${p.forma_pagamento_quitacao} (Nota quitada)`;
-    }
-    return finEhQuitado(p) ? "Na Nota (quitado, forma não registrada)" : "Na Nota (em aberto)";
-  }
-  return p.forma_pagamento || "";
-}
-
 // Estado persistente do último cálculo financeiro
 let _caixaState = {
   faturamento: 0,
@@ -1828,7 +1739,6 @@ let _caixaState = {
   totalNaNota: 0,
   fundoAbertura: 0,
   qtdPedidos: 0,
-  qNaNota: { pix: 0, transf: 0, cartao: 0, efetivo: 0, qr: 0 },
 };
 
 // Sessão de caixa ativa (carregada ao abrir a aba financeiro)
@@ -1911,9 +1821,9 @@ async function _abrirSessaoCaixa(valorAbertura, descricao) {
   return data;
 }
 
-async function calcularFinanceiro(forcar = false) {
+async function calcularFinanceiro() {
   const abaFin = document.getElementById("financeiro");
-  if (!forcar && (!abaFin || !abaFin.classList.contains("active"))) return;
+  if (!abaFin || !abaFin.classList.contains("active")) return;
 
   const elInicio  = document.getElementById("fin-inicio");
   const elFim     = document.getElementById("fin-fim");
@@ -1972,18 +1882,7 @@ async function calcularFinanceiro(forcar = false) {
   const _elSecMotoboys = document.getElementById("secao-motoboys-financeiro");
   if (_elSecMotoboys) _elSecMotoboys.style.display = ehGestor ? "" : "none";
 
-  // (Classificação de método de pagamento agora vem das funções globais
-  // finClassificarMetodo / finPedidoTemMetodo / finValorNoMetodo, definidas
-  // no topo da seção Financeiro — mesma lógica usada nas exportações.)
-
   // ── 4. Busca pedidos dentro da janela da sessão ───────────────────
-  // CORRIGIDO: o filtro de "Pagamento" comparava direto com a coluna
-  // forma_pagamento do pedido — que para notas quitadas continua sempre
-  // "NaNota" (a forma real fica em forma_pagamento_quitacao) e para
-  // pagamento dividido é sempre "Multipagamento". Isso fazia o filtro
-  // esconder pedidos que, na prática, tinham sido recebidos naquele método.
-  // Agora a busca traz tudo dentro do período e o filtro é aplicado com
-  // base no método efetivamente recebido.
   let query = supa
     .from("pedidos")
     .select("*, motoboys(nome)")
@@ -1991,15 +1890,12 @@ async function calcularFinanceiro(forcar = false) {
     .gte("created_at", utcI)
     .lte("created_at", utcF);
 
+  if (tipoFiltro !== "todos") query = query.eq("forma_pagamento", tipoFiltro);
+
   if (!ehGestor && _perfilId) query = query.eq("garcom_id", _perfilId);
 
   const { data: pedidos } = await query;
   let peds = pedidos || [];
-
-  if (tipoFiltro !== "todos") {
-    const bucketAlvo = finClassificarMetodo(tipoFiltro);
-    peds = peds.filter((p) => finPedidoTemMetodo(p, bucketAlvo));
-  }
 
   if (facturaFiltro === "com_factura")
     peds = peds.filter((p) => p.dados_factura?.ruc || p.dados_factura?.ci);
@@ -2007,19 +1903,23 @@ async function calcularFinanceiro(forcar = false) {
     peds = peds.filter((p) => !p.dados_factura?.ruc && !p.dados_factura?.ci);
 
   // ── 5. Movimentações de caixa ─────────────────────────────────────
-  // CORRIGIDO: antes, sempre que havia uma sessão de caixa aberta, a busca
-  // ficava presa a essa sessão (sessao_id) e ignorava o período (utcI/utcF)
-  // escolhido no filtro — por isso "Filtrar por período" não trazia todas
-  // as despesas. Agora a busca usa SEMPRE o mesmo intervalo de datas
-  // aplicado aos pedidos, igual ao restante do relatório.
-  let caixaQuery = supa
-    .from("movimentacoes_caixa")
-    .select("*")
-    .gte("created_at", utcI)
-    .lte("created_at", utcF);
-  if (!ehGestor) caixaQuery = caixaQuery.eq("usuario_email", emailAtual);
-  const { data: caixaData } = await caixaQuery;
-  let caixa = caixaData || [];
+  let caixa = [];
+  if (_sessaoCaixaAtiva?.id) {
+    let caixaQuery = supa
+      .from("movimentacoes_caixa")
+      .select("*")
+      .eq("sessao_id", _sessaoCaixaAtiva.id);
+    if (!ehGestor) caixaQuery = caixaQuery.eq("usuario_email", emailAtual);
+    const { data: caixaData } = await caixaQuery;
+    caixa = caixaData || [];
+  } else if (ehGestor) {
+    const { data: caixaData } = await supa
+      .from("movimentacoes_caixa")
+      .select("*")
+      .gte("created_at", utcI)
+      .lte("created_at", utcF);
+    caixa = caixaData || [];
+  }
 
   if (_sessaoCaixaAtiva) _verificarBloqueioCaixa(emailAtual);
 
@@ -2036,42 +1936,34 @@ async function calcularFinanceiro(forcar = false) {
   let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
 
-  // Acumula, por método, quanto do total veio de uma quitação de Nota — usado
-  // só para a indicação visual "📋 inclui Gs X de Nota quitada" nos cards.
-  const qNaNota = { pix: 0, transf: 0, cartao: 0, efetivo: 0, qr: 0 };
-
   peds.forEach((p) => {
-    // ═══ PULAR: NaNota não quitado ou Mensalista (ainda não é receita) ═══
-    if (!finPedidoContaComoReceita(p)) return;
+    const pag = (p.forma_pagamento || "").toLowerCase();
+    const isNaNota = pag === "nanota";
+    const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
+
+    // ═══ PULAR: NaNota não quitado ou Mensalista ═══
+    if ((isNaNota && !isQuitado) || pag === "mensalista") {
+      // Não soma ao faturamento nem conta como pedido
+      return;
+    }
 
     const val = safeNum(p.total_geral);
     faturamento += val;
     qtdPedidos++;
 
-    // CORRIGIDO: cada balde agora vem de finValorNoMetodo, a MESMA função
-    // usada nas exportações — cobre pagamento direto, quitação de Nota
-    // (via forma_pagamento_quitacao) e cada parte de um Multipagamento.
-    // Isso garante que Dinheiro+Cartão+Pix+Transf+QR+NaNota sempre soma
-    // exatamente o faturamento, não importa a forma de pagamento.
-    const vPix     = finValorNoMetodo(p, "pix");
-    const vTransf  = finValorNoMetodo(p, "transf");
-    const vCartao  = finValorNoMetodo(p, "cartao");
-    const vEfetivo = finValorNoMetodo(p, "efetivo");
-    const vQr      = finValorNoMetodo(p, "qr");
-    totalPix += vPix; totalTransf += vTransf; totalCartao += vCartao;
-    totalEfetivo += vEfetivo; totalQrCelular += vQr;
-
-    // Sobra não classificada (ex.: multipagamento com método desconhecido,
-    // ou quitação antiga sem forma_pagamento_quitacao registrada) — cai em
-    // "Na Nota" para não desaparecer silenciosamente do relatório.
-    const restante = val - (vPix + vTransf + vCartao + vEfetivo + vQr);
-    if (restante > 0.01) totalNaNota += restante;
-
-    // Indicação visual: quanto desse pedido veio de uma Nota quitada
-    const pag = (p.forma_pagamento || "").toLowerCase();
-    if (pag === "nanota" && finEhQuitado(p)) {
-      qNaNota.pix += vPix; qNaNota.transf += vTransf; qNaNota.cartao += vCartao;
-      qNaNota.efetivo += vEfetivo; qNaNota.qr += vQr;
+    // Acumula por método
+    if (pag.includes("pix")) {
+      totalPix += val;
+    } else if (pag.includes("transfer")) {
+      totalTransf += val;
+    } else if (pag.includes("cartao") || pag.includes("cartão")) {
+      totalCartao += val;
+    } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
+      totalEfetivo += val;
+    } else if (isNaNota && isQuitado) {
+      totalNaNota += val; // só quitados
+    } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
+      totalQrCelular += val;
     }
 
     // Custo entregas (somente delivery)
@@ -2101,7 +1993,7 @@ async function calcularFinanceiro(forcar = false) {
 
   _caixaState = { faturamento, custoEntregas, totalSaidas, totalEntradas,
                   totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
-                  totalQrCelular, qtdPedidos, totalSangria, fundoAbertura, qNaNota };
+                  totalQrCelular, qtdPedidos, totalSangria, fundoAbertura };
 
   const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
@@ -2116,26 +2008,8 @@ async function calcularFinanceiro(forcar = false) {
   setV("total-nanota",      fmt(totalNaNota));
   setV("total-qr",          fmt(totalQrCelular)); // id do elemento deve ser "total-qr"
   setV("total-fundo-abertura", fmt(fundoAbertura));
-  setV("total-sangria",     fmt(totalSangria));
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
-
-  // NOVO: indicação visual de quanto, em cada método, veio de uma nota quitada
-  const _mostrarOrigemNota = (badgeId, valorId, valor) => {
-    const badge = document.getElementById(badgeId);
-    if (!badge) return;
-    if (valor > 0) {
-      setV(valorId, fmt(valor));
-      badge.style.display = "";
-    } else {
-      badge.style.display = "none";
-    }
-  };
-  _mostrarOrigemNota("total-pix-nanota-label",      "total-pix-nanota",      qNaNota.pix);
-  _mostrarOrigemNota("total-transf-nanota-label",   "total-transf-nanota",   qNaNota.transf);
-  _mostrarOrigemNota("total-cartao-nanota-label",   "total-cartao-nanota",   qNaNota.cartao);
-  _mostrarOrigemNota("total-efetivo-nanota-label",  "total-efetivo-nanota",  qNaNota.efetivo);
-  _mostrarOrigemNota("total-qr-nanota-label",       "total-qr-nanota",       qNaNota.qr);
 
   // Badge do operador / info da sessão
   const badgeCaixa = document.getElementById("badge-caixa-operador");
@@ -2154,33 +2028,20 @@ async function calcularFinanceiro(forcar = false) {
   }
 
   // ── Tabelas de despesas e motoboys (mantido) ──────────────────────
-  // CORRIGIDO: a sangria retirada do caixa não aparecia em nenhuma lista do
-  // relatório (só entrava, escondida, dentro do total de "Saídas"). Agora
-  // ela também aparece nesta tabela, identificada com o rótulo "💸 Sangria",
-  // para constar no relatório mesmo depois de a retirada ter sido feita.
   const tbD = document.getElementById("lista-despesas-caixa");
   if (tbD) {
-    const despesasEExtratos = (caixa || []).filter((c) => c.tipo === "despesa" || c.tipo === "sangria");
+    const despesas = (caixa || []).filter((c) => c.tipo === "despesa");
     const _DLABELS = {
       despesas_gerais:"📦 Despesas Gerais", contas_fixas:"🏠 Contas Fixas",
       pagamento_fornecedor:"🤝 Fornecedor",  pagamento_funcionario:"👷 Funcionário",
       pagamento_terceiros:"👥 Terceiros",    manutencao:"🔧 Manutenção",
       retirada:"💵 Retirada", motoboy:"🛵 Motoboy", outro:"✏️ Outro",
     };
-    if (!despesasEExtratos.length) {
-      tbD.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;padding:16px">Nenhuma despesa no período</td></tr>';
+    if (!despesas.length) {
+      tbD.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;padding:16px">Nenhuma despesa nesta sessão</td></tr>';
     } else {
-      tbD.innerHTML = despesasEExtratos.map((d) => {
+      tbD.innerHTML = despesas.map((d) => {
         const dt = new Date(d.created_at).toLocaleString("pt-BR", { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" });
-        if (d.tipo === "sangria") {
-          const obs = d.descricao || "";
-          return `<tr>
-            <td style="white-space:nowrap;color:#666;font-size:0.82rem">${dt}</td>
-            <td><span style="background:#fdf0e0;color:#a9660d;padding:2px 7px;border-radius:10px;font-size:0.78rem">💸 Sangria</span></td>
-            <td style="color:#555;font-size:0.85rem">${obs}</td>
-            <td style="text-align:right;font-weight:700;color:#c0392b;white-space:nowrap">${fmt(d.valor)}</td>
-            <td style="text-align:center;white-space:nowrap;color:#aaa;font-size:0.78rem">retirada</td></tr>`;
-        }
         const tipoLabel = _DLABELS[d.tipo_despesa] || d.tipo_despesa || "—";
         const descExtra = d.tipo_despesa === "outro" && d.descricao_outro ? ` (${d.descricao_outro})` : "";
         const obs = d.descricao || "";
@@ -2197,20 +2058,6 @@ async function calcularFinanceiro(forcar = false) {
       }).join("");
     }
   }
-
-  // ── NOVO: filtro "Somente despesas" ────────────────────────────────
-  // Quando marcado, esconde os cards de vendas/faturamento e deixa em
-  // destaque somente a tabela de despesas (+ sangrias) do período filtrado.
-  const _elSomenteDespesas = document.getElementById("fin-somente-despesas");
-  const _somenteDespesas = !!_elSomenteDespesas?.checked;
-  const _kpiGrids = abaFin.querySelectorAll(".kpi-grid");
-  _kpiGrids.forEach((g) => {
-    const wrapCard = g.closest(".card");
-    if (wrapCard) wrapCard.style.display = _somenteDespesas ? "none" : "";
-    else g.style.display = _somenteDespesas ? "none" : "";
-  });
-  if (_elSecMotoboys) _elSecMotoboys.style.display = (_somenteDespesas || !ehGestor) ? "none" : "";
-  if (_elSecDespesas) _elSecDespesas.style.display = ehGestor ? "" : "none";
 
   const tbM = document.getElementById("lista-financeiro-motoboys");
   if (tbM) {
@@ -2234,13 +2081,6 @@ async function calcularFinanceiro(forcar = false) {
 }
 
 // ── Verifica bloqueio por sangria limite ───────────────────────────
-// CORRIGIDO: a versão anterior somava apenas movimentações de caixa do tipo
-// "efetivo", mas esse tipo NUNCA é gravado pelo sistema (vendas não geram
-// uma linha em movimentacoes_caixa) — então o dinheiro que efetivamente
-// entra vendendo nunca contava para o limite, e a sangria praticamente
-// nunca disparava. Agora somamos: fundo de abertura + suprimentos + vendas
-// em dinheiro do dia (inclui a fatia em dinheiro de pedidos com
-// Multipagamento) − sangrias já retiradas − despesas pagas do caixa.
 async function _verificarBloqueioCaixa(emailAtual) {
   const { data: cfg } = await supa
     .from("configuracoes")
@@ -2254,16 +2094,6 @@ async function _verificarBloqueioCaixa(emailAtual) {
   const dStr = hoje.toISOString().split("T")[0];
   const dIni = new Date(new Date(dStr + "T00:00:00").getTime() + _tz).toISOString();
   const dFim = new Date(new Date(dStr + "T23:59:59").getTime() + _tz).toISOString();
-
-  const safeNum = (v) => {
-    if (!v) return 0;
-    if (typeof v === "number") return v;
-    return parseFloat(v.toString().replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
-  };
-  // Usa a mesma classificação global (finClassificarMetodo) que o Financeiro
-  // e as exportações — aqui só nos interessa se caiu no balde "efetivo".
-
-  // 1. Aberturas, suprimentos, sangrias e despesas do dia (retiradas/entradas manuais)
   const { data: movs } = await supa
     .from("movimentacoes_caixa")
     .select("tipo, valor")
@@ -2273,34 +2103,14 @@ async function _verificarBloqueioCaixa(emailAtual) {
 
   let efetivo = 0;
   (movs || []).forEach((m) => {
-    const v = safeNum(m.valor);
-    if (m.tipo === "abertura" || m.tipo === "suprimento") efetivo += v;
-    if (m.tipo === "sangria" || m.tipo === "despesa") efetivo -= v;
-  });
-
-  // 2. Vendas em dinheiro do dia (contas do próprio operador quando aplicável)
-  let pedQuery = supa
-    .from("pedidos")
-    .select("forma_pagamento, obs_pagamento, total_geral, garcom_id")
-    .in("status", ["entregue", "em_preparo", "pronto_entrega", "saiu_entrega"])
-    .gte("created_at", dIni)
-    .lte("created_at", dFim);
-  if (_perfilId) pedQuery = pedQuery.eq("garcom_id", _perfilId);
-  const { data: pedidosDia } = await pedQuery;
-
-  (pedidosDia || []).forEach((p) => {
-    const pag = (p.forma_pagamento || "").toLowerCase();
-    if (pag === "multipagamento") {
-      let partes = [];
-      try { partes = JSON.parse(p.obs_pagamento || "[]"); } catch (_) { partes = []; }
-      (Array.isArray(partes) ? partes : []).forEach((parte) => {
-        if (finClassificarMetodo(parte.metodo) === "efetivo") {
-          efetivo += safeNum(parte.valor);
-        }
-      });
-    } else if (finClassificarMetodo(pag) === "efetivo") {
-      efetivo += safeNum(p.total_geral);
-    }
+    const v = parseFloat(m.valor) || 0;
+    if (
+      m.tipo === "efetivo" ||
+      m.tipo === "abertura" ||
+      m.tipo === "suprimento"
+    )
+      efetivo += v;
+    if (m.tipo === "sangria") efetivo -= v;
   });
 
   const status = cfg.caixa_status || {};
@@ -2353,88 +2163,79 @@ async function autorizarReaberturaCaixa(emailAlvo) {
   calcularFinanceiro();
 }
 
-// ── Busca pedidos para exportação (CSV/XLSX), usando os MESMOS filtros
-// (período, forma de pagamento, factura) e a MESMA classificação de método
-// de pagamento usadas no cálculo do Financeiro — garante que o que é
-// exportado sempre bate com o que aparece na tela.
-async function _finBuscarPedidosExport() {
+async function exportarFinanceiro() {
+  // 1. Pega os mesmos filtros da tela
   const elInicio = document.getElementById("fin-inicio");
   const elFim = document.getElementById("fin-fim");
   const elTipo = document.getElementById("fin-tipo");
   const elFactura = document.getElementById("fin-factura");
 
-  const inicio = elInicio?.value;
-  const fim = elFim?.value;
+  const inicio = elInicio.value;
+  const fim = elFim.value;
   const tipoFiltro = elTipo ? elTipo.value : "todos";
   const facturaFiltro = elFactura ? elFactura.value : "todos";
 
-  // UTC-3 PY (horario de verao permanente desde 2024) — mesmo cálculo de
-  // período usado em calcularFinanceiro, em vez de uma string local "solta".
-  const _tz = 3 * 60 * 60 * 1000;
-  const hoje = new Date().toISOString().split("T")[0];
-  const iniStr = inicio || hoje;
-  const fimStr = fim || hoje;
-  const dataInicio = new Date(new Date(iniStr + "T00:00:00").getTime() + _tz).toISOString();
-  const dataFim    = new Date(new Date(fimStr + "T23:59:59").getTime() + _tz).toISOString();
+  // Define período
+  const hoje = new Date();
+  const ano = hoje.getFullYear();
+  const mes = String(hoje.getMonth() + 1).padStart(2, "0");
+  const dia = String(hoje.getDate()).padStart(2, "0");
 
-  // CORRIGIDO: usava .eq("status","entregue") só — diferente da lista de
-  // status usada na tela do Financeiro (entregue/em_preparo/pronto_entrega/
-  // saiu_entrega), fazendo o total exportado não bater com o exibido.
-  const { data: pedidos, error } = await supa
+  let dataInicio, dataFim;
+  if (inicio && fim) {
+    dataInicio = inicio + " 00:00:00";
+    dataFim = fim + " 23:59:59";
+  } else {
+    dataInicio = `${ano}-${mes}-${dia} 00:00:00`;
+    dataFim = `${ano}-${mes}-${dia} 23:59:59`;
+  }
+
+  // 2. Busca os dados
+  let query = supa
     .from("pedidos")
     .select("*")
-    .in("status", ["entregue", "em_preparo", "pronto_entrega", "saiu_entrega"])
+    .eq("status", "entregue")
     .gte("created_at", dataInicio)
     .lte("created_at", dataFim);
 
+  if (tipoFiltro !== "todos") {
+    query = query.eq("forma_pagamento", tipoFiltro);
+  }
+
+  const { data: pedidos, error } = await query;
+
   if (error) {
     alert("Erro ao buscar dados: " + error.message);
-    return null;
+    return;
   }
 
-  // CORRIGIDO: exportação incluía Notas em aberto (ainda não pagas) e vendas
-  // para Mensalista (já pagas na compra do plano) como se fossem receita —
-  // agora segue a mesma regra do Financeiro.
-  let peds = (pedidos || []).filter(finPedidoContaComoReceita);
-
-  // CORRIGIDO: filtrava comparando direto com forma_pagamento — não
-  // enxergava notas quitadas nem pagamentos divididos no método certo.
-  if (tipoFiltro !== "todos") {
-    const bucketAlvo = finClassificarMetodo(tipoFiltro);
-    peds = peds.filter((p) => finPedidoTemMetodo(p, bucketAlvo));
-  }
-
-  if (facturaFiltro === "com_factura") {
-    peds = peds.filter((p) => p.dados_factura?.ruc || p.dados_factura?.ci);
-  } else if (facturaFiltro === "sem_factura") {
-    peds = peds.filter((p) => !p.dados_factura?.ruc && !p.dados_factura?.ci);
-  }
-
-  return { peds, iniStr, fimStr };
-}
-
-async function exportarFinanceiro() {
-  const dados = await _finBuscarPedidosExport();
-  if (!dados) return;
-  const { peds, iniStr, fimStr } = dados;
-
-  if (!peds.length) {
+  if (!pedidos || pedidos.length === 0) {
     alert("Nenhum pedido encontrado no período selecionado.");
     return;
+  }
+
+  // 3. Filtra por factura se necessário
+  let pedidosFiltrados = pedidos;
+  if (facturaFiltro === "com_factura") {
+    pedidosFiltrados = pedidos.filter(
+      (p) => p.dados_factura && (p.dados_factura.ruc || p.dados_factura.ci),
+    );
+  } else if (facturaFiltro === "sem_factura") {
+    pedidosFiltrados = pedidos.filter(
+      (p) => !p.dados_factura || (!p.dados_factura.ruc && !p.dados_factura.ci),
+    );
   }
 
   // 4. Prepara dados para CSV
   let csv =
     "ID Pedido,Data/Hora,Cliente,Telefone,Tipo Entrega,Forma Pagamento,Subtotal,Frete,Total,RUC/CI,Razão Social\n";
 
-  peds.forEach((p) => {
+  pedidosFiltrados.forEach((p) => {
     const data = new Date(p.created_at).toLocaleString("pt-BR");
     const cliente = (p.cliente_nome || "").replace(/,/g, " "); // Remove vírgulas
     const telefone = p.cliente_telefone || "";
     const tipo = p.tipo_entrega || "";
-    // CORRIGIDO: mostrava o forma_pagamento cru ("NaNota"/"Multipagamento")
-    // — agora mostra o método efetivamente recebido (ex.: "Pix (Nota quitada)").
-    const pagamento = finFormaEfetivaLabel(p).replace(/,/g, " ");
+    const pagamento = p.forma_pagamento || "";
     const subtotal = p.subtotal || 0;
     const frete = p.frete_cobrado_cliente || 0;
     const total = p.total_geral || 0;
@@ -2452,7 +2253,7 @@ async function exportarFinanceiro() {
   link.setAttribute("href", url);
   link.setAttribute(
     "download",
-    `Relatorio_Financeiro_${iniStr}_a_${fimStr}.csv`,
+    `Relatorio_Financeiro_${ano}-${mes}-${dia}.csv`,
   );
   link.style.visibility = "hidden";
 
@@ -2461,13 +2262,15 @@ async function exportarFinanceiro() {
   document.body.removeChild(link);
 
   alert(
-    `✅ Relatório exportado com sucesso!\n\nTotal de pedidos: ${peds.length}`,
+    `✅ Relatório exportado com sucesso!\n\nTotal de pedidos: ${pedidosFiltrados.length}`,
   );
 }
 
 // =====================================================
 // ALTERNATIVA: EXPORTAR PARA EXCEL REAL (XLSX)
 // =====================================================
+// Se quiser usar biblioteca SheetJS para Excel verdadeiro:
+
 async function exportarFinanceiroXLSX() {
   // Aviso: Requer biblioteca SheetJS
   if (typeof XLSX === "undefined") {
@@ -2476,29 +2279,18 @@ async function exportarFinanceiroXLSX() {
     return;
   }
 
-  // CORRIGIDO: esta função nunca buscava seus próprios dados — usava
-  // "pedidosFiltrados", uma variável que só existe dentro de
-  // exportarFinanceiro(), então clicar em "Exportar XLSX" sempre disparava
-  // um erro (ReferenceError) e nada era gerado. Agora busca os dados com o
-  // mesmo helper usado no CSV, garantindo os mesmos números.
-  const dados = await _finBuscarPedidosExport();
-  if (!dados) return;
-  const { peds, iniStr, fimStr } = dados;
-
-  if (!peds.length) {
-    alert("Nenhum pedido encontrado no período selecionado.");
-    return;
-  }
+  // Busca os dados (mesmo código acima)
+  // ... código de busca ...
 
   // Cria planilha
   const ws = XLSX.utils.json_to_sheet(
-    peds.map((p) => ({
+    pedidosFiltrados.map((p) => ({
       ID: p.id,
       Data: new Date(p.created_at).toLocaleString("pt-BR"),
       Cliente: p.cliente_nome,
       Telefone: p.cliente_telefone,
       Tipo: p.tipo_entrega,
-      Pagamento: finFormaEfetivaLabel(p),
+      Pagamento: p.forma_pagamento,
       Subtotal: p.subtotal,
       Frete: p.frete_cobrado_cliente,
       Total: p.total_geral,
@@ -2510,7 +2302,11 @@ async function exportarFinanceiroXLSX() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Vendas");
 
-  XLSX.writeFile(wb, `Relatorio_${iniStr}_a_${fimStr}.xlsx`);
+  const hoje = new Date();
+  XLSX.writeFile(
+    wb,
+    `Relatorio_${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}.xlsx`,
+  );
 }
 
 // =====================================================
@@ -2854,19 +2650,8 @@ async function fecharCaixaResumo() {
     return;
   }
 
-  // CORRIGIDO: "Fechar Dia" fica no painel do PDV, não na aba Financeiro.
-  // calcularFinanceiro() só recalculava quando a aba Financeiro estava
-  // visível na tela — por isso o fechamento vinha com tudo zerado. Também
-  // limpamos qualquer filtro de período deixado na aba Financeiro para
-  // garantir que o fechamento reflita exatamente a sessão de caixa atual,
-  // e não um período antigo que o gestor tenha filtrado antes.
-  const _elFinIni = document.getElementById('fin-inicio');
-  const _elFinFim = document.getElementById('fin-fim');
-  if (_elFinIni) _elFinIni.value = '';
-  if (_elFinFim) _elFinFim.value = '';
-
-  // Recalcula para garantir dados atualizados (forçado, mesmo fora da aba Financeiro)
-  await calcularFinanceiro(true);
+  // Recalcula para garantir dados atualizados
+  await calcularFinanceiro();
   const s = _caixaState;
   const fmt = (n) => 'Gs ' + n.toLocaleString('es-PY');
   const lucro = s.faturamento + s.totalEntradas - s.custoEntregas - s.totalSaidas;
@@ -2903,7 +2688,6 @@ async function fecharCaixaResumo() {
         <div style="display:flex; justify-content:space-between;"><span>📦 Pedidos:</span>${s.qtdPedidos}</div>
         <div style="display:flex; justify-content:space-between;"><span>🏍️ Custo Entregas:</span>${fmt(s.custoEntregas)}</div>
         <div style="display:flex; justify-content:space-between;"><span>💸 Saídas (despesas):</span>${fmt(s.totalSaidas)}</div>
-        <div style="display:flex; justify-content:space-between; padding-left:12px; color:#c0392b"><span>└ Sangria retirada:</span>${fmt(s.totalSangria || 0)}</div>
         <div style="display:flex; justify-content:space-between;"><span>➕ Entradas (incl. fundo):</span>${fmt(s.totalEntradas)}</div>
         <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>└ Fundo de abertura:</span>${fmt(s.fundoAbertura)}</div>
         <hr>
@@ -2945,24 +2729,16 @@ async function fecharCaixaResumo() {
     _sessaoCaixaAtiva = null;
     pdvCarregarPainelCaixa();
     ['card-faturamento','card-custo-moto','card-lucro','total-pix','total-transf',
-     'total-cartao','total-efetivo','total-nanota','total-fundo-abertura','card-ticket-medio',
-     'total-qr','total-sangria'
+     'total-cartao','total-efetivo','total-nanota','total-fundo-abertura','card-ticket-medio'
     ].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.innerText = 'Gs 0';
-    });
-    ['total-pix-nanota-label','total-transf-nanota-label','total-cartao-nanota-label',
-     'total-efetivo-nanota-label','total-qr-nanota-label'
-    ].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = 'none';
     });
     const qEl = document.getElementById('card-qtd-pedidos');
     if (qEl) qEl.innerText = '0';
     _caixaState = { faturamento:0, custoEntregas:0, totalSaidas:0, totalEntradas:0,
                     totalPix:0, totalTransf:0, totalCartao:0, totalEfetivo:0,
-                    totalNaNota:0, totalQrCelular:0, fundoAbertura:0, qtdPedidos:0,
-                    qNaNota: { pix:0, transf:0, cartao:0, efetivo:0, qr:0 } };
+                    totalNaNota:0, totalQrCelular:0, fundoAbertura:0, qtdPedidos:0 };
     document.getElementById('modal-fechamento-caixa')?.remove();
     alert('✅ Caixa fechado com sucesso!');
   };
@@ -3010,8 +2786,6 @@ async function exportarCSVPowerBI() {
     "cliente_telefone",
     "endereco_entrega",
     "forma_pagamento",
-    "forma_pagamento_efetiva", // NOVO: método realmente recebido (resolve NaNota quitado e Multipagamento)
-    "conta_como_receita",      // NOVO: false p/ Nota em aberto e vendas Mensalista (já contabilizadas na compra do plano)
     "obs_pagamento",
     "subtotal",
     "desconto_cupom",
@@ -3049,8 +2823,6 @@ async function exportarCSVPowerBI() {
       p.cliente_telefone || "",
       p.endereco_entrega || "",
       p.forma_pagamento || "",
-      finFormaEfetivaLabel(p),
-      finPedidoContaComoReceita(p),
       p.obs_pagamento || "",
       p.subtotal || 0,
       p.desconto_cupom || 0,
@@ -3090,20 +2862,9 @@ async function exportarCSVPowerBI() {
 
 // ── PDF via janela de impressão ───────────────────────────
 async function exportarPDF() {
-  const pedidosBrutos = await _buscarDadosRelatorio();
-  if (!pedidosBrutos.length) {
-    alert("Nenhum pedido no período.");
-    return;
-  }
-
-  // CORRIGIDO: incluía Notas em aberto e vendas para Mensalista como se
-  // fossem receita recebida, e classificava por método comparando direto
-  // com forma_pagamento — não reconhecia notas quitadas nem pagamento
-  // dividido, então os cards de Pix/Dinheiro/Cartão não batiam com o total
-  // faturado nem com a tela do Financeiro. Agora usa a mesma lógica.
-  const pedidos = pedidosBrutos.filter(finPedidoContaComoReceita);
+  const pedidos = await _buscarDadosRelatorio();
   if (!pedidos.length) {
-    alert("Nenhum pedido com receita reconhecida no período.");
+    alert("Nenhum pedido no período.");
     return;
   }
 
@@ -3113,13 +2874,20 @@ async function exportarPDF() {
   const periodoLabel = `${elI?.value || hoje} a ${elF?.value || hoje}`;
 
   const fmt = (n) => "Gs " + (n || 0).toLocaleString("es-PY");
-  const total = pedidos.reduce((a, p) => a + (parseFloat(p.total_geral) || 0), 0);
-  const somaMetodo = (bucket) => pedidos.reduce((a, p) => a + finValorNoMetodo(p, bucket), 0);
-  const totalPix    = somaMetodo("pix");
-  const totalEfet   = somaMetodo("efetivo");
-  const totalCard   = somaMetodo("cartao");
-  const totalTransf = somaMetodo("transf");
-  const totalQr     = somaMetodo("qr");
+  const total = pedidos.reduce((a, p) => a + (p.total_geral || 0), 0);
+  const totalPix = pedidos
+    .filter((p) => (p.forma_pagamento || "").toLowerCase().includes("pix"))
+    .reduce((a, p) => a + (p.total_geral || 0), 0);
+  const totalEfet = pedidos
+    .filter(
+      (p) =>
+        (p.forma_pagamento || "").toLowerCase().includes("efetivo") ||
+        (p.forma_pagamento || "").toLowerCase().includes("dinheiro"),
+    )
+    .reduce((a, p) => a + (p.total_geral || 0), 0);
+  const totalCard = pedidos
+    .filter((p) => (p.forma_pagamento || "").toLowerCase().includes("cart"))
+    .reduce((a, p) => a + (p.total_geral || 0), 0);
 
   const rows = pedidos
     .map((p) => {
@@ -3133,7 +2901,7 @@ async function exportarPDF() {
       <td>${hora}</td>
       <td>${p.cliente_nome || "-"}</td>
       <td>${itens || "-"}</td>
-      <td>${finFormaEfetivaLabel(p) || "-"}</td>
+      <td>${p.forma_pagamento || "-"}</td>
       <td style="text-align:right">${fmt(p.total_geral)}</td>
     </tr>`;
     })
@@ -3170,8 +2938,6 @@ async function exportarPDF() {
     <div class="card"><div class="lbl">Pix</div><div class="val">${fmt(totalPix)}</div></div>
     <div class="card"><div class="lbl">Dinheiro</div><div class="val">${fmt(totalEfet)}</div></div>
     <div class="card"><div class="lbl">Cartão</div><div class="val">${fmt(totalCard)}</div></div>
-    <div class="card"><div class="lbl">Transferência</div><div class="val">${fmt(totalTransf)}</div></div>
-    <div class="card"><div class="lbl">QR</div><div class="val">${fmt(totalQr)}</div></div>
   </div>
   <table>
     <thead><tr><th>#</th><th>Data/Hora</th><th>Cliente</th><th>Itens</th><th>Pagamento</th><th>Total</th></tr></thead>
@@ -4108,28 +3874,8 @@ async function salvarProduto() {
       inventario_id: inventarioId,
     };
 
-    // CORREÇÃO: .select() é obrigatório aqui. Sem ele, um UPDATE/INSERT
-    // bloqueado pela política de RLS da tabela `produtos` retorna
-    // { data: null, error: null } — ou seja, o botão "Salvar" fechava
-    // o modal e recarregava a lista como se tivesse dado certo, mesmo
-    // quando NADA foi gravado no banco. Com .select(), a resposta traz
-    // de volta a linha realmente afetada, permitindo detectar o
-    // falso-positivo (mesmo padrão já corrigido em subscriptionService.js).
-    const { data: linhaSalva, error: errSalvar } = id
-      ? await supa.from("produtos").update(dados).eq("id", id).select()
-      : await supa.from("produtos").insert([dados]).select();
-
-    if (errSalvar) {
-      alert("❌ Erro ao salvar produto: " + errSalvar.message);
-      return;
-    }
-    if (!linhaSalva || linhaSalva.length === 0) {
-      alert(
-        "⚠️ O produto não foi salvo — nenhuma linha foi alterada no banco.\n" +
-        "Verifique a política de RLS (UPDATE/INSERT) da tabela 'produtos' para o seu perfil.",
-      );
-      return;
-    }
+    if (id) await supa.from("produtos").update(dados).eq("id", id);
+    else await supa.from("produtos").insert([dados]);
 
     fecharModal("modal-produto");
     carregarProdutos();
@@ -10223,23 +9969,6 @@ function _coletarMultiPagamentoPDV() {
 }
 
 async function salvarPedidoBalcao() {
-  // CORRIGIDO: o bloqueio por limite de sangria nunca impedia uma venda de
-  // ser finalizada — só bloqueava lançamentos manuais no caixa (suprimento/
-  // despesa). Agora nenhuma venda é concluída enquanto o caixa do operador
-  // estiver bloqueado por sangria.
-  {
-    const _emailAtualPDV = document.getElementById("user-email")?.innerText || "";
-    const { data: _cfgBloqueio } = await supa
-      .from("configuracoes")
-      .select("caixa_status")
-      .maybeSingle();
-    const _statusBloqueio = _cfgBloqueio?.caixa_status || {};
-    if (_statusBloqueio[_emailAtualPDV]?.bloqueado) {
-      alert("⛔ Caixa bloqueado por sangria. Solicite autorização de um gestor (dono/gerente) para reabrir antes de continuar vendendo.");
-      return;
-    }
-  }
-
   if (carrinhoPDV.length === 0 && !window._mesaAbertaId)
     return alert(t("alert.carrinho_vazio"));
   if (carrinhoPDV.length === 0 && window._mesaAbertaId)
@@ -10576,7 +10305,7 @@ async function salvarPedidoBalcao() {
       .replace(/=+$/, "");
     window.open(
       `imprimir.html?d=${base64}`,
-      "PrintPDV",
+      `PrintPDV_${novoPedido.id}_${Date.now()}`,
       "width=400,height=600",
     );
   }
@@ -10588,6 +10317,12 @@ async function salvarPedidoBalcao() {
   // Reset tipo entrega e campos de delivery
   const tipoSelPDV = document.getElementById("balcao-tipo-entrega");
   if (tipoSelPDV) tipoSelPDV.value = "balcao";
+  // Reset visual das abas — sem isso a aba "Delivery/Retirada" clicada no
+  // pedido anterior continuava destacada mesmo com o valor já voltando pra
+  // "balcao", confundindo quem está no caixa sobre o tipo do próximo pedido
+  document.querySelectorAll(".pdv-tipo-tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tipo === "balcao");
+  });
   const endPDV = document.getElementById("balcao-endereco");
   if (endPDV) endPDV.value = "";
   const geoPDVLat = document.getElementById("balcao-geo-lat");
@@ -12993,20 +12728,17 @@ async function excluirDespesa(id) {
 // ══════════════════════════════════════════════════════════════
 async function verificarContratoAdmin(session) {
   try {
-    const { data: perfil } = await supa
+    const { data: perfil } = await supabase
       .from("perfis_acesso")
       .select("cargo")
       .eq("id", session.user.id)
       .maybeSingle();
 
     const cargo = perfil?.cargo || "dono";
+    if (cargo === "adminMaster" || cargo !== "dono") return;
 
-    // adminMaster e outros cargos não precisam assinar
-    if (cargo === "adminMaster") return;
-    if (cargo !== "dono") return;
-
-    // Verifica se o dono já aceitou
-    const { data } = await supa
+    // Verifica se já aceitou
+    const { data } = await supabase
       .from("contratos_aceites")
       .select("id")
       .eq("usuario_id", session.user.id)
@@ -13014,12 +12746,15 @@ async function verificarContratoAdmin(session) {
       .maybeSingle();
 
     if (!data) {
-      // Ainda não assinou — exibe overlay bloqueante no próprio admin
       _admMostrarContratoOverlay(session);
     }
   } catch (e) {
-    // Fail-open: se erro ao verificar, não bloqueia o admin
     console.warn("verificarContratoAdmin error:", e.message);
+    // Se houver erro de JWT, força logout
+    if (e.message && e.message.includes("JWT expired")) {
+      await supabase.auth.signOut();
+      window.location.href = "login.html";
+    }
   }
 }
 
@@ -13114,12 +12849,17 @@ function admToggleBtnAceitar() {
 }
 
 async function admAceitarContrato() {
-  const session = window._admContratoSession;
-  if (!session) return;
+  // 1. Obtém a sessão atual (renovada automaticamente se necessário)
+  const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError || !session) {
+    alert("Sessão expirada. Faça login novamente.");
+    window.location.href = "login.html";
+    return;
+  }
 
+  // 2. Valida campos do formulário
   const nome = document.getElementById("adm-c-nome")?.value?.trim();
   const doc = document.getElementById("adm-c-doc")?.value?.trim();
-
   if (!nome || !doc) {
     alert("Preencha seu nome completo e RUC/C.I. para assinar.");
     return;
@@ -13132,50 +12872,69 @@ async function admAceitarContrato() {
   }
 
   try {
-    let ip = "";
-    try {
-      const r = await fetch("https://api.ipify.org?format=json");
-      ip = (await r.json()).ip || "";
-    } catch (_) {}
-
-    const { error } = await supa.from("contratos_aceites").insert([
-      {
+    // 3. Tenta inserir o contrato
+    const { error: insertError } = await supabase
+      .from("contratos_aceites")
+      .insert([{
         usuario_id: session.user.id,
         aceito: true,
         nome_assinante: nome,
         doc_assinante: doc,
-        ip_assinante: ip,
+        ip_assinante: await getIp(),
         user_agent: navigator.userAgent,
         aceito_em: new Date().toISOString(),
-      },
-    ]);
+      }]);
 
-    if (error) {
-      // Pode já existir — tenta update
-      if (error.code === "23505" || error.message?.includes("duplicate")) {
-        await supa
-          .from("contratos_aceites")
-          .update({
-            aceito: true,
-            nome_assinante: nome,
-            doc_assinante: doc,
-            aceito_em: new Date().toISOString(),
-          })
-          .eq("usuario_id", session.user.id);
-      } else {
-        throw error;
-      }
+    // Se deu conflito (já existe), faz update
+    if (insertError && insertError.code === "23505") {
+      const { error: updateError } = await supabase
+        .from("contratos_aceites")
+        .update({
+          aceito: true,
+          nome_assinante: nome,
+          doc_assinante: doc,
+          aceito_em: new Date().toISOString(),
+        })
+        .eq("usuario_id", session.user.id);
+
+      if (updateError) throw updateError;
+    } else if (insertError) {
+      throw insertError;
     }
 
+    // 4. Fecha o overlay e recarrega a página ou apenas remove o overlay
     const overlay = document.getElementById("contrato-admin-overlay");
     if (overlay) overlay.style.display = "none";
-    console.log("✅ Contrato aceito com sucesso.");
-  } catch (e) {
-    alert("Erro ao registrar assinatura: " + e.message);
+    alert("✅ Contrato assinado com sucesso!");
+
+    // Opcional: recarrega a página para refletir permissões
+    // window.location.reload();
+
+  } catch (error) {
+    // 5. Tratamento específico para token expirado
+    if (error.message && error.message.includes("JWT expired")) {
+      alert("Sua sessão expirou. Faça login novamente.");
+      await supabase.auth.signOut();
+      window.location.href = "login.html";
+    } else {
+      alert("Erro ao registrar assinatura: " + error.message);
+    }
+  } finally {
     if (btn) {
       btn.disabled = false;
       btn.textContent = "✍️ ASSINAR E CONTINUAR";
     }
+  }
+}
+
+// Função auxiliar para obter IP (opcional)
+async function getIp() {
+  try {
+    const res = await fetch("https://api.ipify.org?format=json");
+    const data = await res.json();
+    return data.ip || "";
+  } catch {
+    return "";
   }
 }
 
@@ -13212,6 +12971,49 @@ async function registrarMovimentacaoCaixa({
   }
   if (!usuario_email) {
     // tenta pegar do elemento da UI
+    usuario_email = document.getElementById('user-email')?.innerText || 'sistema';
+  }
+
+  const payload = {
+    tipo,
+    valor,
+    descricao: descricao || '',
+    usuario_email,
+    sessao_id,
+    forma_pagamento: forma_pagamento || null,
+    tipo_despesa: tipo_despesa || null,
+    descricao_outro: descricao_outro || null,
+    created_at: new Date().toISOString()
+  };
+
+  const { error } = await supa
+    .from('movimentacoes_caixa')
+    .insert([payload]);
+
+  if (error) {
+    console.error('Erro ao registrar movimentação:', error);
+    return false;
+  }
+  return true;
+}async function registrarMovimentacaoCaixa({ 
+  tipo, 
+  valor, 
+  descricao, 
+  usuario_email, 
+  sessao_id, 
+  forma_pagamento = null,
+  tipo_despesa = null,
+  descricao_outro = null
+}) {
+  if (!sessao_id) {
+    console.error('registrarMovimentacaoCaixa: sessao_id é obrigatório');
+    return false;
+  }
+  if (!valor || valor <= 0) {
+    console.error('registrarMovimentacaoCaixa: valor deve ser > 0');
+    return false;
+  }
+  if (!usuario_email) {
     usuario_email = document.getElementById('user-email')?.innerText || 'sistema';
   }
 
