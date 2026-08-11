@@ -8067,7 +8067,7 @@ function _mostrarModalOpcoesPDV(produto, tipo) {
 
   // ── VARIAÇÕES ────────────────────────────────────────────────
   if (tipo === "variacoes") {
-    const ativas = (cfg.variacoes || []).filter((v) => v.ativo !== false);
+    const ativas = (cfg.variacoes || []).filter(v => v.ativo !== false);
     corpo().innerHTML = `<p style="font-size:0.82rem;color:#555;margin-bottom:10px;font-weight:600">Escolha a variação:</p>
       <div style="display:flex;flex-direction:column;gap:8px">
         ${ativas

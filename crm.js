@@ -25,8 +25,13 @@ async function _crmCarregarConfig() {
     .select('cashback_percentual, cashback_validade_dias')
     .maybeSingle();
   if (data) {
-    _crm_cfg.cashback_percentual   = data.cashback_percentual   ?? 10;
-    _crm_cfg.cashback_validade_dias = data.cashback_validade_dias ?? 30;
+    // Se o valor for null ou undefined, usa fallback, mas se for 0, mantém 0
+    _crm_cfg.cashback_percentual   = data.cashback_percentual !== null && data.cashback_percentual !== undefined
+      ? data.cashback_percentual
+      : 10;
+    _crm_cfg.cashback_validade_dias = data.cashback_validade_dias !== null && data.cashback_validade_dias !== undefined
+      ? data.cashback_validade_dias
+      : 30;
   }
   // Atualiza campos de config se visíveis
   const elPct = document.getElementById('crm-cfg-pct');
@@ -283,8 +288,12 @@ async function crmGerarCashback(telefone, totalPedido, pedidoId = null) {
   if (!telefone || !totalPedido) return;
 
   await _crmCarregarConfig();
-  const pct       = _crm_cfg.cashback_percentual   || 10;
-  const valDias   = _crm_cfg.cashback_validade_dias || 30;
+  const pct = _crm_cfg.cashback_percentual !== null && _crm_cfg.cashback_percentual !== undefined
+    ? _crm_cfg.cashback_percentual
+    : 10;
+  const valDias = _crm_cfg.cashback_validade_dias !== null && _crm_cfg.cashback_validade_dias !== undefined
+    ? _crm_cfg.cashback_validade_dias
+    : 30;
   const valorCash = Math.round(totalPedido * pct / 100);
   if (valorCash <= 0) return;
 
@@ -433,16 +442,27 @@ function pdvGetCashbackDesconto(totalAtual) {
 //  Config Cashback (salvar nas configurações)
 // ──────────────────────────────────────────────────────────────
 async function crmSalvarConfig() {
-  const pct = parseFloat(document.getElementById('crm-cfg-pct')?.value) || 10;
-  const val = parseInt(document.getElementById('crm-cfg-val')?.value)   || 30;
+  const pctEl = document.getElementById('crm-cfg-pct');
+  const valEl = document.getElementById('crm-cfg-val');
+
+  // Lê os valores, tratando NaN
+  const pct = pctEl ? parseFloat(pctEl.value) : 10;
+  const val = valEl ? parseInt(valEl.value) : 30;
+
+  // Se for NaN, usa fallback
+  const pctFinal = isNaN(pct) ? 10 : pct;
+  const valFinal = isNaN(val) ? 30 : val;
 
   const { error } = await supa.from('configuracoes')
-    .update({ cashback_percentual: pct, cashback_validade_dias: val })
+    .update({ cashback_percentual: pctFinal, cashback_validade_dias: valFinal })
     .gt('id', 0);
 
   if (error) { alert('Erro ao salvar: ' + error.message); return; }
-  _crm_cfg.cashback_percentual   = pct;
-  _crm_cfg.cashback_validade_dias = val;
+
+  // Atualiza estado global
+  _crm_cfg.cashback_percentual   = pctFinal;
+  _crm_cfg.cashback_validade_dias = valFinal;
+
   alert('✅ Configurações de cashback salvas!');
 }
 
