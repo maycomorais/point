@@ -1931,15 +1931,35 @@ async function calcularFinanceiro() {
   };
   const fmt = (n) => "Gs " + n.toLocaleString("es-PY");
 
-  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0, totalNaNota = 0;
-  let totalQrCelular = 0; // ← renomeie para QqMaquina se preferir
+  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0;
+  let totalQrCelular = 0;
   let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
+
+  // ─── Função auxiliar para distribuir valor por método ──────────────
+  function somarPorMetodo(metodo, valor) {
+    const m = metodo.toLowerCase().trim();
+    if (m.includes("pix")) {
+      totalPix += valor;
+    } else if (m.includes("transfer") || m.includes("alias")) {
+      totalTransf += valor;
+    } else if (m.includes("cartao") || m.includes("cartão") || m.includes("tarjeta")) {
+      totalCartao += valor;
+    } else if (m.includes("efetivo") || m.includes("dinheiro")) {
+      totalEfetivo += valor;
+    } else if (m.includes("qr")) {
+      totalQrCelular += valor;
+    } else {
+      // Fallback: qualquer método não mapeado cai em Efetivo (para não perder o valor)
+      totalEfetivo += valor;
+    }
+  }
 
   peds.forEach((p) => {
     const pag = (p.forma_pagamento || "").toLowerCase();
     const isNaNota = pag === "nanota";
     const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
+    const isMultipag = pag === "multipagamento";
 
     // ═══ PULAR: NaNota não quitado ou Mensalista ═══
     if ((isNaNota && !isQuitado) || pag === "mensalista") {
@@ -1951,22 +1971,64 @@ async function calcularFinanceiro() {
     faturamento += val;
     qtdPedidos++;
 
-    // Acumula por método
-    if (pag.includes("pix")) {
-      totalPix += val;
-    } else if (pag.includes("transfer")) {
-      totalTransf += val;
-    } else if (pag.includes("cartao") || pag.includes("cartão")) {
-      totalCartao += val;
-    } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
-      totalEfetivo += val;
-    } else if (isNaNota && isQuitado) {
-      totalNaNota += val; // só quitados
-    } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
-      totalQrCelular += val;
+    // ─── Multipagamento ──────────────────────────────────────────────
+    if (isMultipag) {
+      try {
+        const partes = JSON.parse(p.obs_pagamento || "[]");
+        if (Array.isArray(partes) && partes.length > 0) {
+          let somaPartes = 0;
+          partes.forEach(part => {
+            const metodo = part.metodo || "";
+            const valorPart = safeNum(part.valor);
+            somarPorMetodo(metodo, valorPart);
+            somaPartes += valorPart;
+          });
+          // Ajuste fino: se houver diferença (arredondamento), coloca em Efetivo
+          const diff = val - somaPartes;
+          if (Math.abs(diff) > 0.01) totalEfetivo += diff;
+        } else {
+          // JSON vazio ou inválido: trata como Efetivo
+          totalEfetivo += val;
+        }
+      } catch (e) {
+        // Não é JSON: trata como Efetivo
+        totalEfetivo += val;
+      }
+    }
+    // ─── Na Nota quitado ─────────────────────────────────────────────
+    else if (isNaNota && isQuitado) {
+      let metodoReal = p.forma_pagamento_quitacao || "";
+      if (!metodoReal) {
+        // Fallback: tenta extrair do texto de obs_pagamento (ex: "Forma: Pix")
+        const match = p.obs_pagamento.match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
+        if (match) metodoReal = match[1];
+      }
+      if (metodoReal) {
+        somarPorMetodo(metodoReal, val);
+      } else {
+        // Sem informação: coloca em Efetivo
+        totalEfetivo += val;
+      }
+    }
+    // ─── Pagamento normal (não multipag, não nanota quitado) ────────
+    else {
+      if (pag.includes("pix")) {
+        totalPix += val;
+      } else if (pag.includes("transfer")) {
+        totalTransf += val;
+      } else if (pag.includes("cartao") || pag.includes("cartão")) {
+        totalCartao += val;
+      } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
+        totalEfetivo += val;
+      } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
+        totalQrCelular += val;
+      } else {
+        // Qualquer outro método: coloca em Efetivo
+        totalEfetivo += val;
+      }
     }
 
-    // Custo entregas (somente delivery)
+    // ─── Custo entregas (somente delivery) ──────────────────────────
     if (p.tipo_entrega === "delivery") {
       const taxa = safeNum(p.frete_motoboy) || TAXA_MOTOBOY || 0;
       custoEntregas += taxa;
@@ -1991,9 +2053,12 @@ async function calcularFinanceiro() {
   const fundoAbertura = safeNum(_sessaoCaixaAtiva?.valor_abertura);
   totalEfetivo += fundoAbertura;
 
-  _caixaState = { faturamento, custoEntregas, totalSaidas, totalEntradas,
-                  totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
-                  totalQrCelular, qtdPedidos, totalSangria, fundoAbertura };
+  // Estado persistente (sem totalNaNota – removido)
+  _caixaState = {
+    faturamento, custoEntregas, totalSaidas, totalEntradas,
+    totalPix, totalTransf, totalCartao, totalEfetivo,
+    totalQrCelular, qtdPedidos, totalSangria, fundoAbertura
+  };
 
   const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
@@ -2005,8 +2070,10 @@ async function calcularFinanceiro() {
   setV("total-transf",      fmt(totalTransf));
   setV("total-cartao",      fmt(totalCartao));
   setV("total-efetivo",     fmt(totalEfetivo));
-  setV("total-nanota",      fmt(totalNaNota));
-  setV("total-qr",          fmt(totalQrCelular)); // id do elemento deve ser "total-qr"
+  // O card "total-nanota" pode ser oculto ou removido; se quiser exibir zero:
+  const elNaNota = document.getElementById("total-nanota");
+  if (elNaNota) elNaNota.innerText = "Gs 0";
+  setV("total-qr",          fmt(totalQrCelular));
   setV("total-fundo-abertura", fmt(fundoAbertura));
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
@@ -2694,6 +2761,34 @@ async function fecharCaixaResumo() {
         <div style="display:flex; justify-content:space-between; font-size:1.1rem; font-weight:800; color:#1a7a2e;"><span>💵 RESULTADO:</span>${fmt(lucro)}</div>
         <div style="display:flex; justify-content:space-between; font-size:1rem; font-weight:700; color:#2980b9; margin-top:6px;"><span>🪙 DINHEIRO NA GAVETA:</span>${fmt(dinheiroCaixa)}</div>
       </div>
+
+      <div style="margin-top:18px; padding:14px; background:#f8f9fa; border-radius:12px; border:1.5px solid #e5e7eb; font-family:inherit;">
+        <label style="display:flex; align-items:center; gap:8px; font-weight:700; font-size:0.9rem; cursor:pointer;">
+          <input type="checkbox" id="fecha-incluir-delivery-desp" onchange="_toggleDeliveryDespesaFechamento()" style="width:17px; height:17px; cursor:pointer;">
+          🛵 Incluir pagamento do delivery em despesas?
+        </label>
+        <div id="fecha-delivery-desp-box" style="display:none; margin-top:12px;">
+          <div style="font-size:0.8rem; color:#666; margin-bottom:8px;">
+            Custo de entregas do período: <strong>${fmt(s.custoEntregas)}</strong> — ajuste se necessário.
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <select id="fecha-delivery-forma-pag" style="flex:1; min-width:140px; padding:9px; border:1.5px solid #e0e0e0; border-radius:8px; font-size:0.85rem; font-weight:600;">
+              <option value="Efetivo">💵 Efectivo</option>
+              <option value="Cartao">💳 Tarjeta</option>
+              <option value="CartaoBR">💳🇧🇷 Cartão BR</option>
+              <option value="Pix">🟢 Pix</option>
+              <option value="Transferencia">🏦 Alias/Transferencia</option>
+              <option value="QrPy">📱 QR Paraguay</option>
+            </select>
+            <div style="flex:1; min-width:140px; position:relative;">
+              <span style="position:absolute; left:8px; top:50%; transform:translateY(-50%); color:#888; font-size:0.8rem; pointer-events:none;">Gs</span>
+              <input type="number" id="fecha-delivery-valor" min="0" step="1000" value="${Math.round(s.custoEntregas)}"
+                style="width:100%; padding:9px 9px 9px 28px; border:1.5px solid #e0e0e0; border-radius:8px; font-size:0.9rem; font-weight:700; box-sizing:border-box;">
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div style="display:flex; gap:10px; margin-top:20px;">
         <button onclick="window.print()" style="flex:1; padding:12px; background:#1a7a2e; color:#fff; border:none; border-radius:8px; font-weight:700; cursor:pointer;">🖨️ Imprimir</button>
         <button onclick="fecharCaixaConfirmar()" style="flex:1; padding:12px; background:#e74c3c; color:#fff; border:none; border-radius:8px; font-weight:700; cursor:pointer;">✅ Fechar Caixa</button>
@@ -2701,6 +2796,13 @@ async function fecharCaixaResumo() {
     </div>
   `;
   document.body.appendChild(modal);
+
+  // Mostra/esconde a forma de pagamento + valor do delivery
+  window._toggleDeliveryDespesaFechamento = function() {
+    const chk = document.getElementById('fecha-incluir-delivery-desp');
+    const box = document.getElementById('fecha-delivery-desp-box');
+    if (box) box.style.display = chk?.checked ? 'block' : 'none';
+  };
 
   // Função de confirmação (será chamada pelo botão)
   window.fecharCaixaConfirmar = async function() {
@@ -2721,6 +2823,25 @@ async function fecharCaixaResumo() {
         usuario_email: document.getElementById('user-email')?.innerText || 'admin',
         sessao_id: _sessaoCaixaAtiva.id
       });
+
+      // NOVO: se marcado, registra o pagamento do delivery/motoboy como
+      // despesa do caixa daquele dia, com a forma de pagamento escolhida.
+      const incluirDelivery = document.getElementById('fecha-incluir-delivery-desp')?.checked;
+      if (incluirDelivery) {
+        const valorDelivery = parseFloat(document.getElementById('fecha-delivery-valor')?.value) || 0;
+        const formaDelivery = document.getElementById('fecha-delivery-forma-pag')?.value || 'Efetivo';
+        if (valorDelivery > 0) {
+          await registrarMovimentacaoCaixa({
+            tipo: 'despesa',
+            valor: valorDelivery,
+            descricao: `Pagamento de delivery/motoboys - ${new Date().toLocaleDateString('pt-BR')}`,
+            usuario_email: document.getElementById('user-email')?.innerText || 'admin',
+            sessao_id: _sessaoCaixaAtiva.id,
+            forma_pagamento: formaDelivery,
+            tipo_despesa: 'motoboy',
+          });
+        }
+      }
 
     } catch(e) {
       console.warn('Aviso fechamento:', e.message);
@@ -8066,24 +8187,26 @@ function _mostrarModalOpcoesPDV(produto, tipo) {
   const corpo = () => modal.querySelector("#_pdv-modal-corpo");
 
   // ── VARIAÇÕES ────────────────────────────────────────────────
-  if (tipo === "variacoes") {
-    const ativas = (cfg.variacoes || []).filter(v => v.ativo !== false);
-    corpo().innerHTML = `<p style="font-size:0.82rem;color:#555;margin-bottom:10px;font-weight:600">Escolha a variação:</p>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${ativas
-          .map(
-            (v, i) => `
-          <label style="display:flex;align-items:center;gap:12px;border:2px solid #e5e7eb;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s"
+if (tipo === "variacoes") {
+  // Manter o índice ORIGINAL de cada variação, mesmo após filtrar
+  const ativasComIndice = (cfg.variacoes || [])
+    .map((v, idx) => ({ ...v, idxOriginal: idx }))
+    .filter((v) => v.ativo !== false);
+
+  corpo().innerHTML = `<p style="font-size:0.82rem;color:#555;margin-bottom:10px;font-weight:600">Escolha a variação:</p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${ativasComIndice
+        .map((v, i) => `
+          <label style="display:flex;align-items:center;gap:12px;border:2px solid ${i === 0 ? "var(--primary)" : "#e5e7eb"};border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s"
             onclick="this.closest('div').querySelectorAll('label').forEach(l=>l.style.borderColor='#e5e7eb');this.style.borderColor='var(--primary)';this.style.background='#f0fff4'">
-            <input type="radio" name="_pdv_var" value="${i}" style="width:18px;height:18px" ${i === 0 ? "checked" : ""}>
+            <input type="radio" name="_pdv_var" value="${v.idxOriginal}" ${i === 0 ? "checked" : ""} style="width:18px;height:18px">
             ${v.img || produto.imagem_url ? `<img src="${v.img || produto.imagem_url}" style="width:44px;height:44px;border-radius:8px;object-fit:cover" onerror="this.style.display='none'">` : ""}
             <div style="flex:1"><div style="font-weight:700;font-size:0.9rem">${v.nome}</div></div>
             <div style="font-weight:700;color:var(--primary)">Gs ${(v.preco || produto.preco || 0).toLocaleString("es-PY")}</div>
-          </label>`,
-          )
-          .join("")}
-      </div>`;
-  }
+          </label>`)
+        .join("")}
+    </div>`;
+}
 
   // ── PIZZA ────────────────────────────────────────────────────
   else if (tipo === "pizza") {
@@ -9644,9 +9767,18 @@ function atualizarInfoPagPDV(total) {
   const recebidoInput = document.getElementById("pdv-valor-recebido");
   const trocoRow = document.getElementById("pdv-troco-row");
   if (efetivoBox) {
+    // CORRIGIDO: antes, .focus() rodava toda vez que atualizarInfoPagPDV()
+    // era chamada — inclusive a cada dígito digitado no campo de Desconto
+    // (que chama atualizarCarrinhoPDV() -> atualizarInfoPagPDV() a cada
+    // tecla via oninput). Isso roubava o foco do campo de desconto para o
+    // campo "valor recebido" a cada caractere digitado, dando a impressão
+    // de que só dava para digitar um número por vez. Agora só focamos
+    // quando a caixa de Efetivo está de fato aparecendo agora (mudança
+    // real de forma de pagamento), não em todo recálculo de total.
+    const jaEstavaVisivel = efetivoBox.style.display === "block";
     if (pag === "Efetivo") {
       efetivoBox.style.display = "block";
-      if (recebidoInput) recebidoInput.focus();
+      if (recebidoInput && !jaEstavaVisivel) recebidoInput.focus();
       pdvCalcTroco();
     } else {
       efetivoBox.style.display = "none";
@@ -9919,19 +10051,29 @@ function atualizarRestanteMultiPDV() {
       "0",
   );
   const inputs = [...document.querySelectorAll('[id^="multi-valor-pdv-"]')];
+
+  // CORRIGIDO: antes, o auto-preenchimento olhava só se o campo estava
+  // "vazio" — então funcionava na 1ª tecla digitada, mas assim que o campo
+  // seguinte recebia esse valor automático ele deixava de estar "vazio" e
+  // parava de acompanhar. Resultado: digitar "50000" no 1º campo só
+  // refletia no 2º campo o valor calculado a partir do "5" (1ª tecla).
+  // Agora usa data-touched (já vinha marcado no oninput, mas não era lido
+  // aqui): só o(s) campo(s) nunca editados manualmente pelo usuário
+  // recebem o auto-preenchimento, e continuam sendo recalculados a cada
+  // tecla digitada nos campos que o usuário de fato editou.
+  const naoTocados = inputs.filter((inp) => inp.dataset.touched !== "1");
+  if (naoTocados.length === 1) {
+    const somaTocados = inputs
+      .filter((inp) => inp !== naoTocados[0])
+      .reduce((s, inp) => s + (parseFloat(inp.value) || 0), 0);
+    const restanteCalc = Math.max(0, total - somaTocados);
+    naoTocados[0].value = restanteCalc || "";
+  }
+
   let soma = 0;
   inputs.forEach((inp) => {
     soma += parseFloat(inp.value) || 0;
   });
-
-  // Auto-fill: se exatamente 1 input vazio e sobra valor
-  const vazios = inputs.filter(
-    (inp) => !inp.value || parseFloat(inp.value) === 0,
-  );
-  if (vazios.length === 1 && total - soma > 0) {
-    vazios[0].value = total - soma;
-    soma = total;
-  }
 
   const bar = document.getElementById("multi-status-pdv");
   const el = document.getElementById("multi-restante-pdv");
@@ -10204,39 +10346,65 @@ async function salvarPedidoBalcao() {
   // ── Mensalista: desconta saldo financeiro (e kg se tiver) ─────
   if (pag === "Mensalista" && _pdvMensalistaSel) {
   const pm = _pdvMensalistaSel;
-  const totalVenda = subtotalLiquido; // sem frete para mensalista
+  const totalVenda = subtotalLiquido; // sem frete
   const isKg = (pm.produto_nome || "").toLowerCase().includes("kg");
-  // Desconta valor (permite negativo)
+
+  // Desconta valor
   const novoValorRestante = Math.round((pm.valor_restante || 0) - totalVenda);
-  // Desconta kg se o carrinho tiver item kg do plano dele
+
+  // Desconta quantidade
   let novaQtdRestante = pm.quantidade_restante;
   if (isKg) {
     const totalGramas = novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0);
-    novaQtdRestante = pm.quantidade_restante - totalGramas; // pode ficar negativo
+    novaQtdRestante = pm.quantidade_restante - totalGramas;
   } else {
     const totalUn = novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0);
-    novaQtdRestante = pm.quantidade_restante - totalUn; // pode ficar negativo
+    novaQtdRestante = pm.quantidade_restante - totalUn;
   }
-  await supa.from("planos_mensalistas")
-    .update({ valor_restante: novoValorRestante, quantidade_restante: novaQtdRestante })
-    .eq("id", pm.id);
-  // Registrar entrega no histórico com itens_extras
-  const totalExtras = subtotalLiquido; // ou 0, tanto faz
-  await supa.from("mensalista_entregas").insert([{
-    plano_id: pm.id,
-    cliente_id: pm.clientes?.id || null,
-    produto_nome: pm.produto_nome,
-    quantidade: isKg
-      ? novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0)
-      : novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0),
-    observacoes: `PDV #${novoPedido.id}`,
-    itens_extras: novosItens.length > 0 ? novosItens : null,
-    valor_extras: Math.round(subtotalLiquido), // ou null
-  }]);
-  // Atualiza cache local
-  _pdvMensalistaSel.valor_restante   = novoValorRestante;
-  _pdvMensalistaSel.quantidade_restante = novaQtdRestante;
-  // Venda mensalista NÃO entra no financeiro — pula movimentacao_caixa
+
+  // Atualiza no banco com tratamento de erro
+  try {
+    const { error: errPlano } = await supa
+      .from("planos_mensalistas")
+      .update({
+        valor_restante: novoValorRestante,
+        quantidade_restante: novaQtdRestante
+      })
+      .eq("id", pm.id);
+
+    if (errPlano) {
+      console.error("Erro ao atualizar plano mensalista:", errPlano);
+      alert("Erro ao atualizar saldo do plano. Verifique manualmente.");
+    } else {
+      // Atualiza cache local
+      pm.valor_restante = novoValorRestante;
+      pm.quantidade_restante = novaQtdRestante;
+
+      const idx = _pdvMensalistas.findIndex(p => p.id === pm.id);
+      if (idx !== -1) {
+        _pdvMensalistas[idx].valor_restante = novoValorRestante;
+        _pdvMensalistas[idx].quantidade_restante = novaQtdRestante;
+      }
+
+      // Registra entrega no histórico (com itens extras)
+      await supa.from("mensalista_entregas").insert([{
+        plano_id: pm.id,
+        cliente_id: pm.clientes?.id || null,
+        produto_nome: pm.produto_nome,
+        quantidade: isKg
+          ? novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0)
+          : novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0),
+        observacoes: `PDV #${novoPedido.id}`,
+        itens_extras: novosItens.length > 0 ? novosItens : null,
+        valor_extras: Math.round(subtotalLiquido)
+      }]);
+    }
+  } catch (e) {
+    console.error("Exceção ao processar mensalista:", e);
+    alert("Erro inesperado ao atualizar plano. Contate o suporte.");
+  }
+
+  // Venda mensalista NÃO entra no financeiro
   _pdvPularMovimentacao = true;
 }
 
@@ -11023,7 +11191,10 @@ async function carregarCupons() {
   tbody.innerHTML = "";
 
   (data || []).forEach((c) => {
-    const tipoLabel = c.tipo === "percentual" ? `${c.valor}%` : "Frete Grátis";
+    const tipoLabel =
+      c.tipo === "percentual" ? `${c.valor}%` :
+      c.tipo === "fixo" ? `Gs ${(c.valor || 0).toLocaleString("es-PY")}` :
+      "Frete Grátis";
     const statusBadge = c.ativo
       ? '<span class="badge badge-success">Ativo</span>'
       : '<span class="badge badge-danger">Inativo</span>';
@@ -11105,7 +11276,27 @@ function editarCupom(cupom) {
 function alterarTipoCupom() {
   const tipo = document.getElementById("cupom-tipo").value;
   const boxValor = document.getElementById("box-valor-cupom");
-  boxValor.style.display = tipo === "percentual" ? "block" : "none";
+  const valorInput = document.getElementById("cupom-valor");
+  const labelValor = document.getElementById("label-valor-cupom");
+  const iconValor = document.getElementById("icon-valor-cupom");
+  // A caixa do valor só não faz sentido pro tipo "frete" (frete grátis não
+  // tem valor numérico); "percentual" e "fixo" (NOVO) usam o mesmo campo.
+  boxValor.style.display = tipo === "frete" ? "none" : "block";
+  if (valorInput) {
+    if (tipo === "percentual") {
+      // Limite de 100 só faz sentido pra percentual (100%)
+      valorInput.max = "100";
+      valorInput.placeholder = "Ex: 10";
+      if (labelValor) labelValor.textContent = "Valor do Desconto (%)";
+      if (iconValor) iconValor.className = "fas fa-percent";
+    } else {
+      // Valor fixo em Gs não tem por que ficar travado em 100
+      valorInput.removeAttribute("max");
+      valorInput.placeholder = "Ex: 50000";
+      if (labelValor) labelValor.textContent = "Valor do Desconto (Gs)";
+      if (iconValor) iconValor.className = "fas fa-money-bill";
+    }
+  }
 }
 
 // SALVAR CUPOM
@@ -12728,17 +12919,20 @@ async function excluirDespesa(id) {
 // ══════════════════════════════════════════════════════════════
 async function verificarContratoAdmin(session) {
   try {
-    const { data: perfil } = await supabase
+    const { data: perfil } = await supa
       .from("perfis_acesso")
       .select("cargo")
       .eq("id", session.user.id)
       .maybeSingle();
 
     const cargo = perfil?.cargo || "dono";
-    if (cargo === "adminMaster" || cargo !== "dono") return;
 
-    // Verifica se já aceitou
-    const { data } = await supabase
+    // adminMaster e outros cargos não precisam assinar
+    if (cargo === "adminMaster") return;
+    if (cargo !== "dono") return;
+
+    // Verifica se o dono já aceitou
+    const { data } = await supa
       .from("contratos_aceites")
       .select("id")
       .eq("usuario_id", session.user.id)
@@ -12746,15 +12940,12 @@ async function verificarContratoAdmin(session) {
       .maybeSingle();
 
     if (!data) {
+      // Ainda não assinou — exibe overlay bloqueante no próprio admin
       _admMostrarContratoOverlay(session);
     }
   } catch (e) {
+    // Fail-open: se erro ao verificar, não bloqueia o admin
     console.warn("verificarContratoAdmin error:", e.message);
-    // Se houver erro de JWT, força logout
-    if (e.message && e.message.includes("JWT expired")) {
-      await supabase.auth.signOut();
-      window.location.href = "login.html";
-    }
   }
 }
 
@@ -12849,17 +13040,12 @@ function admToggleBtnAceitar() {
 }
 
 async function admAceitarContrato() {
-  // 1. Obtém a sessão atual (renovada automaticamente se necessário)
-  const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-  if (sessionError || !session) {
-    alert("Sessão expirada. Faça login novamente.");
-    window.location.href = "login.html";
-    return;
-  }
+  const session = window._admContratoSession;
+  if (!session) return;
 
-  // 2. Valida campos do formulário
   const nome = document.getElementById("adm-c-nome")?.value?.trim();
   const doc = document.getElementById("adm-c-doc")?.value?.trim();
+
   if (!nome || !doc) {
     alert("Preencha seu nome completo e RUC/C.I. para assinar.");
     return;
@@ -12872,69 +13058,50 @@ async function admAceitarContrato() {
   }
 
   try {
-    // 3. Tenta inserir o contrato
-    const { error: insertError } = await supabase
-      .from("contratos_aceites")
-      .insert([{
+    let ip = "";
+    try {
+      const r = await fetch("https://api.ipify.org?format=json");
+      ip = (await r.json()).ip || "";
+    } catch (_) {}
+
+    const { error } = await supa.from("contratos_aceites").insert([
+      {
         usuario_id: session.user.id,
         aceito: true,
         nome_assinante: nome,
         doc_assinante: doc,
-        ip_assinante: await getIp(),
+        ip_assinante: ip,
         user_agent: navigator.userAgent,
         aceito_em: new Date().toISOString(),
-      }]);
+      },
+    ]);
 
-    // Se deu conflito (já existe), faz update
-    if (insertError && insertError.code === "23505") {
-      const { error: updateError } = await supabase
-        .from("contratos_aceites")
-        .update({
-          aceito: true,
-          nome_assinante: nome,
-          doc_assinante: doc,
-          aceito_em: new Date().toISOString(),
-        })
-        .eq("usuario_id", session.user.id);
-
-      if (updateError) throw updateError;
-    } else if (insertError) {
-      throw insertError;
+    if (error) {
+      // Pode já existir — tenta update
+      if (error.code === "23505" || error.message?.includes("duplicate")) {
+        await supa
+          .from("contratos_aceites")
+          .update({
+            aceito: true,
+            nome_assinante: nome,
+            doc_assinante: doc,
+            aceito_em: new Date().toISOString(),
+          })
+          .eq("usuario_id", session.user.id);
+      } else {
+        throw error;
+      }
     }
 
-    // 4. Fecha o overlay e recarrega a página ou apenas remove o overlay
     const overlay = document.getElementById("contrato-admin-overlay");
     if (overlay) overlay.style.display = "none";
-    alert("✅ Contrato assinado com sucesso!");
-
-    // Opcional: recarrega a página para refletir permissões
-    // window.location.reload();
-
-  } catch (error) {
-    // 5. Tratamento específico para token expirado
-    if (error.message && error.message.includes("JWT expired")) {
-      alert("Sua sessão expirou. Faça login novamente.");
-      await supabase.auth.signOut();
-      window.location.href = "login.html";
-    } else {
-      alert("Erro ao registrar assinatura: " + error.message);
-    }
-  } finally {
+    console.log("✅ Contrato aceito com sucesso.");
+  } catch (e) {
+    alert("Erro ao registrar assinatura: " + e.message);
     if (btn) {
       btn.disabled = false;
       btn.textContent = "✍️ ASSINAR E CONTINUAR";
     }
-  }
-}
-
-// Função auxiliar para obter IP (opcional)
-async function getIp() {
-  try {
-    const res = await fetch("https://api.ipify.org?format=json");
-    const data = await res.json();
-    return data.ip || "";
-  } catch {
-    return "";
   }
 }
 
