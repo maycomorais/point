@@ -676,7 +676,7 @@
                   <option value="CartaoBR">💳🇧🇷 Cartão BR</option>
                   <option value="Pix">✅ Pix</option>
                   <option value="Transferencia">🏦 Alias (PY)</option>
-                  <option value="QrMarina">📱 QR Maquina</option>
+                  <option value="QrMaquina">📱 QR Maquina</option>
                   <option value="QrCelular">📱 QR Celular</option>
                   <option value="Multipagamento">🔀 Dividir</option>
                   <option value="Mensalista">🎫 Mensalista</option>
@@ -980,6 +980,10 @@
         <h4 style="color: #6b21a8;">📱 QR Celular</h4>
         <div class="value" id="total-qr" style="color: #6b21a8;">Gs 0</div>
         <div style="font-size:0.7rem;color:#6b21a8;margin-top:4px;display:none" id="total-qr-nanota-label">📋 incl. <span id="total-qr-nanota">Gs 0</span> de Nota quitada</div>
+      </div>
+      <div class="kpi-card" style="background: #ede9fe; border-left: 4px solid #7c3aed;">
+        <h4 style="color: #5b21b6;">📱 QR Maquina</h4>
+        <div class="value" id="total-qrmaquina" style="color: #5b21b6;">Gs 0</div>
       </div>
       <div class="kpi-card" style="background: #fef3c7; border-left: 4px solid #d97706;">
         <h4 style="color: #92400e;">📋 Na Nota</h4>
@@ -2371,12 +2375,19 @@
 
         <!-- ── BUILDER: VARIAÇÕES DE SABOR ── -->
         <div id="builder-variacoes" class="builder-section" style="display:none">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="variacoes-estoque-ativo" onchange="toggleVariacoesEstoque()" style="width:18px; height:18px;">
+              <label for="variacoes-estoque-ativo" style="font-weight:700; cursor:pointer; font-size:0.9rem;">📦 Ativar estoque por variação</label>
+            </div>
+            <span style="font-size:0.75rem; color:#888;">(desconta automaticamente na venda)</span>
+          </div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
             <h4 style="color:#8b5cf6;margin:0">🎨 Variações de Sabor</h4>
             <button class="btn btn-sm" style="background:#8b5cf6;color:#fff" onclick="addVariacao()">+ Adicionar Variação</button>
           </div>
           <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 14px;font-size:0.81rem;color:#5b21b6;margin-bottom:12px">
-            🎯 Cada variação tem nome, preço próprio e foto opcional (herda a foto do produto por padrão).<br>
+            🎯 Cada variação tem nome, preço próprio, foto opcional e <strong>estoque individual</strong> (se ativado acima).<br>
             O menu mostrará <strong>"A partir de Gs X"</strong> com o menor preço.
           </div>
           <div id="variacoes-lista" style="display:flex;flex-direction:column;gap:10px"></div>

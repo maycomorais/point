@@ -1914,7 +1914,16 @@ async function calcularFinanceiro() {
     .gte("created_at", utcI)
     .lte("created_at", utcF);
 
-  if (tipoFiltro !== "todos") query = query.eq("forma_pagamento", tipoFiltro);
+  if (tipoFiltro !== "todos") {
+    // "QrMaquina" também precisa cobrir "QrMarina" — valor gravado em
+    // pedidos antigos por causa de um typo já corrigido no seletor do PDV
+    // (ver fix_qrmarina_qrmaquina.sql para migrar os registros antigos).
+    if (tipoFiltro === "QrMaquina") {
+      query = query.in("forma_pagamento", ["QrMaquina", "QrMarina"]);
+    } else {
+      query = query.eq("forma_pagamento", tipoFiltro);
+    }
+  }
 
   if (!ehGestor && _perfilId) query = query.eq("garcom_id", _perfilId);
 
@@ -1956,9 +1965,22 @@ async function calcularFinanceiro() {
   const fmt = (n) => "Gs " + n.toLocaleString("es-PY");
 
   let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0, totalNaNota = 0;
-  let totalQrCelular = 0; // ← renomeie para QqMaquina se preferir
+  let totalQrCelular = 0, totalQrMaquina = 0;
   let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
+
+  // Acumula um valor num dos totais por método — usada tanto para pedidos
+  // com forma_pagamento única quanto para cada parte de um Multipagamento
+  // (evita duplicar a lógica de matching em dois lugares diferentes).
+  function _acumularMetodo(metodoRaw, valor) {
+    const m = (metodoRaw || "").toLowerCase().trim();
+    if (m.includes("pix")) totalPix += valor;
+    else if (m.includes("transfer")) totalTransf += valor;
+    else if (m.includes("cartao") || m.includes("cartão")) totalCartao += valor;
+    else if (m.includes("efetivo") || m.includes("dinheiro")) totalEfetivo += valor;
+    else if (m === "qrmaquina" || m === "qrmarina") totalQrMaquina += valor; // "qrmarina" = typo legado (pedidos antigos), tratado como alias
+    else if (m.includes("qr")) totalQrCelular += valor;  // qrcelular, qrpy e demais variantes de QR
+  }
 
   peds.forEach((p) => {
     const pag = (p.forma_pagamento || "").toLowerCase();
@@ -1976,18 +1998,20 @@ async function calcularFinanceiro() {
     qtdPedidos++;
 
     // Acumula por método
-    if (pag.includes("pix")) {
-      totalPix += val;
-    } else if (pag.includes("transfer")) {
-      totalTransf += val;
-    } else if (pag.includes("cartao") || pag.includes("cartão")) {
-      totalCartao += val;
-    } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
-      totalEfetivo += val;
-    } else if (isNaNota && isQuitado) {
+    if (isNaNota && isQuitado) {
       totalNaNota += val; // só quitados
-    } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
-      totalQrCelular += val;
+    } else if (pag === "multipagamento") {
+      // Multipagamento: obs_pagamento guarda um JSON com as partes
+      // [{ metodo, valor }, ...] — decompõe cada parte no seu próprio
+      // total, senão o pedido inteiro desaparece do detalhamento por
+      // método (só ficava contado no faturamento total).
+      let partes = [];
+      try { partes = JSON.parse(p.obs_pagamento || "[]"); } catch (_) { partes = []; }
+      if (Array.isArray(partes) && partes.length) {
+        partes.forEach((parte) => _acumularMetodo(parte.metodo, safeNum(parte.valor)));
+      }
+    } else {
+      _acumularMetodo(pag, val);
     }
 
     // Custo entregas (somente delivery)
@@ -2017,7 +2041,7 @@ async function calcularFinanceiro() {
 
   _caixaState = { faturamento, custoEntregas, totalSaidas, totalEntradas,
                   totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
-                  totalQrCelular, qtdPedidos, totalSangria, fundoAbertura };
+                  totalQrCelular, totalQrMaquina, qtdPedidos, totalSangria, fundoAbertura };
 
   const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
@@ -2031,6 +2055,7 @@ async function calcularFinanceiro() {
   setV("total-efetivo",     fmt(totalEfetivo));
   setV("total-nanota",      fmt(totalNaNota));
   setV("total-qr",          fmt(totalQrCelular)); // id do elemento deve ser "total-qr"
+  setV("total-qrmaquina",   fmt(totalQrMaquina));
   setV("total-fundo-abertura", fmt(fundoAbertura));
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
@@ -2223,7 +2248,11 @@ async function exportarFinanceiro() {
     .lte("created_at", dataFim);
 
   if (tipoFiltro !== "todos") {
-    query = query.eq("forma_pagamento", tipoFiltro);
+    if (tipoFiltro === "QrMaquina") {
+      query = query.in("forma_pagamento", ["QrMaquina", "QrMarina"]);
+    } else {
+      query = query.eq("forma_pagamento", tipoFiltro);
+    }
   }
 
   const { data: pedidos, error } = await query;
@@ -2733,6 +2762,7 @@ async function fecharCaixaResumo() {
         <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>💳 Cartão:</span>${fmt(s.totalCartao)}</div>
         <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>🏦 Transferência:</span>${fmt(s.totalTransf)}</div>
         <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>📱 QR Celular:</span>${fmt(s.totalQrCelular || 0)}</div>
+        <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>📱 QR Maquina:</span>${fmt(s.totalQrMaquina || 0)}</div>
         <div style="display:flex; justify-content:space-between; padding-left:12px;"><span>📋 Na Nota (quitado):</span>${fmt(s.totalNaNota)}</div>
         <hr>
         <div style="display:flex; justify-content:space-between;"><span>📦 Pedidos:</span>${s.qtdPedidos}</div>
@@ -2833,7 +2863,8 @@ async function fecharCaixaResumo() {
     _sessaoCaixaAtiva = null;
     pdvCarregarPainelCaixa();
     ['card-faturamento','card-custo-moto','card-lucro','total-pix','total-transf',
-     'total-cartao','total-efetivo','total-nanota','total-fundo-abertura','card-ticket-medio'
+     'total-cartao','total-efetivo','total-nanota','total-qr','total-qrmaquina',
+     'total-fundo-abertura','card-ticket-medio'
     ].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.innerText = 'Gs 0';
@@ -2842,7 +2873,7 @@ async function fecharCaixaResumo() {
     if (qEl) qEl.innerText = '0';
     _caixaState = { faturamento:0, custoEntregas:0, totalSaidas:0, totalEntradas:0,
                     totalPix:0, totalTransf:0, totalCartao:0, totalEfetivo:0,
-                    totalNaNota:0, totalQrCelular:0, fundoAbertura:0, qtdPedidos:0 };
+                    totalNaNota:0, totalQrCelular:0, totalQrMaquina:0, fundoAbertura:0, qtdPedidos:0 };
     document.getElementById('modal-fechamento-caixa')?.remove();
     alert('✅ Caixa fechado com sucesso!');
   };
