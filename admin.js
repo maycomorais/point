@@ -1745,6 +1745,20 @@ let _caixaState = {
 let _sessaoCaixaAtiva = null;
 // { id, usuario_email, aberto_em, fechado_em, valor_abertura }
 
+// true somente quando o GESTOR mexe manualmente nos campos de data do
+// Financeiro (input#fin-inicio/fin-fim) para gerar um relatório por período
+// arbitrário. Enquanto for false, calcularFinanceiro() sempre usa a janela
+// real da sessão de caixa ativa (aberto_em → fechado_em/agora), mesmo que
+// os campos de data já estejam com algum valor pré-preenchido (isso evita
+// que pedidos "sumam" do relatório após o primeiro cálculo — ver bug
+// corrigido: campos ficavam presos numa data de calendário UTC, cortando
+// pedidos da própria sessão antes da meia-noite local).
+let _finFiltroManualAtivo = false;
+
+function _finMarcarFiltroManual() {
+  _finFiltroManualAtivo = true;
+}
+
 // ─────────────────────────────────────────────────────────────
 // GERENCIAMENTO DE SESSÃO DE CAIXA
 // ─────────────────────────────────────────────────────────────
@@ -1818,6 +1832,13 @@ async function _abrirSessaoCaixa(valorAbertura, descricao) {
 
   if (error) throw error;
   _sessaoCaixaAtiva = data;
+  // Nova sessão = volta ao modo "acompanhar sessão ao vivo" e limpa
+  // qualquer filtro manual de data que tenha ficado de uma sessão anterior.
+  _finFiltroManualAtivo = false;
+  const _elFinI = document.getElementById("fin-inicio");
+  const _elFinF = document.getElementById("fin-fim");
+  if (_elFinI) _elFinI.value = "";
+  if (_elFinF) _elFinF.value = "";
   return data;
 }
 
@@ -1855,7 +1876,7 @@ async function calcularFinanceiro() {
   const _tz = 3 * 60 * 60 * 1000; // UTC-3 PY
   let utcI, utcF;
 
-  if (ehGestor && elInicio.value && elFim.value) {
+  if (ehGestor && _finFiltroManualAtivo && elInicio.value && elFim.value) {
     utcI = new Date(new Date(elInicio.value + "T00:00:00").getTime() + _tz).toISOString();
     utcF = new Date(new Date(elFim.value   + "T23:59:59").getTime() + _tz).toISOString();
   } else if (_sessaoCaixaAtiva) {
@@ -1863,8 +1884,11 @@ async function calcularFinanceiro() {
     const sessaoFim    = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
     utcI = sessaoInicio;
     utcF = sessaoFim;
-    if (!elInicio.value) elInicio.value = new Date(sessaoInicio).toISOString().split("T")[0];
-    if (!elFim.value)    elFim.value    = new Date(sessaoFim).toISOString().split("T")[0];
+    // Preenche os campos só para EXIBIÇÃO (data já ajustada pro fuso PY,
+    // não mais UTC cru) — não redefine mais sozinho qual janela é usada;
+    // isso só acontece se o gestor editar os campos manualmente.
+    if (!elInicio.value) elInicio.value = new Date(new Date(sessaoInicio).getTime() - _tz).toISOString().split("T")[0];
+    if (!elFim.value)    elFim.value    = new Date(new Date(sessaoFim).getTime() - _tz).toISOString().split("T")[0];
   } else {
     const hoje = new Date().toISOString().split("T")[0];
     utcI = new Date(new Date(hoje + "T00:00:00").getTime() + _tz).toISOString();
@@ -1931,35 +1955,15 @@ async function calcularFinanceiro() {
   };
   const fmt = (n) => "Gs " + n.toLocaleString("es-PY");
 
-  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0;
-  let totalQrCelular = 0;
+  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0, totalNaNota = 0;
+  let totalQrCelular = 0; // ← renomeie para QqMaquina se preferir
   let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
-
-  // ─── Função auxiliar para distribuir valor por método ──────────────
-  function somarPorMetodo(metodo, valor) {
-    const m = metodo.toLowerCase().trim();
-    if (m.includes("pix")) {
-      totalPix += valor;
-    } else if (m.includes("transfer") || m.includes("alias")) {
-      totalTransf += valor;
-    } else if (m.includes("cartao") || m.includes("cartão") || m.includes("tarjeta")) {
-      totalCartao += valor;
-    } else if (m.includes("efetivo") || m.includes("dinheiro")) {
-      totalEfetivo += valor;
-    } else if (m.includes("qr")) {
-      totalQrCelular += valor;
-    } else {
-      // Fallback: qualquer método não mapeado cai em Efetivo (para não perder o valor)
-      totalEfetivo += valor;
-    }
-  }
 
   peds.forEach((p) => {
     const pag = (p.forma_pagamento || "").toLowerCase();
     const isNaNota = pag === "nanota";
     const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
-    const isMultipag = pag === "multipagamento";
 
     // ═══ PULAR: NaNota não quitado ou Mensalista ═══
     if ((isNaNota && !isQuitado) || pag === "mensalista") {
@@ -1971,64 +1975,22 @@ async function calcularFinanceiro() {
     faturamento += val;
     qtdPedidos++;
 
-    // ─── Multipagamento ──────────────────────────────────────────────
-    if (isMultipag) {
-      try {
-        const partes = JSON.parse(p.obs_pagamento || "[]");
-        if (Array.isArray(partes) && partes.length > 0) {
-          let somaPartes = 0;
-          partes.forEach(part => {
-            const metodo = part.metodo || "";
-            const valorPart = safeNum(part.valor);
-            somarPorMetodo(metodo, valorPart);
-            somaPartes += valorPart;
-          });
-          // Ajuste fino: se houver diferença (arredondamento), coloca em Efetivo
-          const diff = val - somaPartes;
-          if (Math.abs(diff) > 0.01) totalEfetivo += diff;
-        } else {
-          // JSON vazio ou inválido: trata como Efetivo
-          totalEfetivo += val;
-        }
-      } catch (e) {
-        // Não é JSON: trata como Efetivo
-        totalEfetivo += val;
-      }
-    }
-    // ─── Na Nota quitado ─────────────────────────────────────────────
-    else if (isNaNota && isQuitado) {
-      let metodoReal = p.forma_pagamento_quitacao || "";
-      if (!metodoReal) {
-        // Fallback: tenta extrair do texto de obs_pagamento (ex: "Forma: Pix")
-        const match = p.obs_pagamento.match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
-        if (match) metodoReal = match[1];
-      }
-      if (metodoReal) {
-        somarPorMetodo(metodoReal, val);
-      } else {
-        // Sem informação: coloca em Efetivo
-        totalEfetivo += val;
-      }
-    }
-    // ─── Pagamento normal (não multipag, não nanota quitado) ────────
-    else {
-      if (pag.includes("pix")) {
-        totalPix += val;
-      } else if (pag.includes("transfer")) {
-        totalTransf += val;
-      } else if (pag.includes("cartao") || pag.includes("cartão")) {
-        totalCartao += val;
-      } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
-        totalEfetivo += val;
-      } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
-        totalQrCelular += val;
-      } else {
-        // Qualquer outro método: coloca em Efetivo
-        totalEfetivo += val;
-      }
+    // Acumula por método
+    if (pag.includes("pix")) {
+      totalPix += val;
+    } else if (pag.includes("transfer")) {
+      totalTransf += val;
+    } else if (pag.includes("cartao") || pag.includes("cartão")) {
+      totalCartao += val;
+    } else if (pag.includes("efetivo") || pag.includes("dinheiro")) {
+      totalEfetivo += val;
+    } else if (isNaNota && isQuitado) {
+      totalNaNota += val; // só quitados
+    } else if (pag.includes("qr") || pag === "qr celular" || pag === "qqmaquina") {
+      totalQrCelular += val;
     }
 
-    // ─── Custo entregas (somente delivery) ──────────────────────────
+    // Custo entregas (somente delivery)
     if (p.tipo_entrega === "delivery") {
       const taxa = safeNum(p.frete_motoboy) || TAXA_MOTOBOY || 0;
       custoEntregas += taxa;
@@ -2053,12 +2015,9 @@ async function calcularFinanceiro() {
   const fundoAbertura = safeNum(_sessaoCaixaAtiva?.valor_abertura);
   totalEfetivo += fundoAbertura;
 
-  // Estado persistente (sem totalNaNota – removido)
-  _caixaState = {
-    faturamento, custoEntregas, totalSaidas, totalEntradas,
-    totalPix, totalTransf, totalCartao, totalEfetivo,
-    totalQrCelular, qtdPedidos, totalSangria, fundoAbertura
-  };
+  _caixaState = { faturamento, custoEntregas, totalSaidas, totalEntradas,
+                  totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
+                  totalQrCelular, qtdPedidos, totalSangria, fundoAbertura };
 
   const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
@@ -2070,10 +2029,8 @@ async function calcularFinanceiro() {
   setV("total-transf",      fmt(totalTransf));
   setV("total-cartao",      fmt(totalCartao));
   setV("total-efetivo",     fmt(totalEfetivo));
-  // O card "total-nanota" pode ser oculto ou removido; se quiser exibir zero:
-  const elNaNota = document.getElementById("total-nanota");
-  if (elNaNota) elNaNota.innerText = "Gs 0";
-  setV("total-qr",          fmt(totalQrCelular));
+  setV("total-nanota",      fmt(totalNaNota));
+  setV("total-qr",          fmt(totalQrCelular)); // id do elemento deve ser "total-qr"
   setV("total-fundo-abertura", fmt(fundoAbertura));
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
@@ -2717,6 +2674,29 @@ async function fecharCaixaResumo() {
     return;
   }
 
+  // ── Confirmação explícita de identidade da sessão ──────────────────
+  // Bug corrigido: para contas gestoras (dono/gerente/adminMaster),
+  // _sessaoCaixaAtiva é sempre "a sessão aberta mais recente, de
+  // QUALQUER usuário" (ver pdvCarregarPainelCaixa/_carregarSessaoCaixa).
+  // Isso significa que se um funcionário abriu o caixa dele às 19h e,
+  // depois, o dono/gerente abre o PDV e clica em "Fechar Dia" pensando
+  // em rotina, o botão fecha SILENCIOSAMENTE o caixa do funcionário —
+  // sem que ninguém tenha "mandado" fechar aquela sessão específica.
+  // Essa confirmação obriga a conferir o operador antes de prosseguir.
+  const donoDaSessao = _sessaoCaixaAtiva.usuario_nome || _sessaoCaixaAtiva.usuario_email || 'desconhecido';
+  const emailAtualFC = document.getElementById('user-email')?.innerText || '';
+  const _abertoEmFmt = new Date(_sessaoCaixaAtiva.aberto_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+  if (_sessaoCaixaAtiva.usuario_email && _sessaoCaixaAtiva.usuario_email !== emailAtualFC) {
+    const okOutraPessoa = confirm(
+      `⚠️ Este caixa foi aberto por OUTRA pessoa:\n\n` +
+      `Operador: ${donoDaSessao}\n` +
+      `Aberto em: ${_abertoEmFmt}\n\n` +
+      `Se essa pessoa ainda está trabalhando, fechar agora vai encerrar a sessão dela sem aviso.\n\n` +
+      `Confirma que quer mesmo fechar o caixa de ${donoDaSessao}?`
+    );
+    if (!okOutraPessoa) return;
+  }
+
   // Recalcula para garantir dados atualizados
   await calcularFinanceiro();
   const s = _caixaState;
@@ -2740,6 +2720,9 @@ async function fecharCaixaResumo() {
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <h3 style="margin:0; font-size:1.2rem;">📊 Fechamento de Caixa</h3>
         <button onclick="this.closest('#modal-fechamento-caixa').remove()" style="background:none; border:none; font-size:1.5rem; cursor:pointer;">&times;</button>
+      </div>
+      <div style="background:#f3f4f6;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:0.82rem;color:#374151">
+        👤 Sessão de <strong>${donoDaSessao}</strong> · aberta em ${_abertoEmFmt} (#${_sessaoCaixaAtiva.id})
       </div>
       <div style="font-family:monospace; font-size:0.9rem; line-height:1.8;">
         <div style="display:flex; justify-content:space-between;"><span>Faturamento Total:</span><strong>${fmt(s.faturamento)}</strong></div>
@@ -3301,7 +3284,7 @@ async function exportarProdutos(formato = "json") {
       const SEP = ";";
       const cols = [
         "nome","descricao","preco","categoria_slug","subcategoria_slug",
-        "ativo","pausado","destaque","somente_balcao","es_bebida",
+        "ativo","pausado","destaque","somente_balcao","es_bebida","promocao_dia",
         "unidade_venda","promo_ativo","promo_tipo","promo_valor",
         "ordem","montagem_config","adicionais"
       ];
@@ -3378,7 +3361,7 @@ function importarProdutos() {
       const CAMPOS_VALIDOS = [
         "nome","descricao","preco","imagem_url","categoria_slug","subcategoria_slug",
         "ativo","pausado","somente_balcao","destaque","ordem","e_montavel","es_bebida",
-        "unidade_venda","montagem_config","adicionais","inventario_id","estoque_qtd",
+        "promocao_dia","unidade_venda","montagem_config","adicionais","inventario_id","estoque_qtd",
         "promo_ativo","promo_tipo","promo_valor"
       ];
 
@@ -3432,9 +3415,27 @@ function importarProdutos() {
   input.click();
 }
 
+// Normaliza montagem_config: alguns registros antigos foram gravados com
+// JSON.stringify duplo (a coluna jsonb guarda uma STRING contendo o JSON,
+// em vez do objeto). Isso faz cfg.__tipo, cfg.variacoes etc. falharem
+// silenciosamente em qualquer lugar do código que não trate esse caso.
+// Corrigimos aqui, uma única vez, na origem dos dados.
+function _normalizarMontagemConfig(produto) {
+  let cfg = produto.montagem_config;
+  if (typeof cfg === "string") {
+    try {
+      cfg = JSON.parse(cfg);
+    } catch (_) {
+      cfg = null;
+    }
+    produto.montagem_config = cfg;
+  }
+  return produto;
+}
+
 async function carregarProdutos() {
   const { data } = await supa.from("produtos").select("*").order("nome");
-  _todosProdutos = data || [];
+  _todosProdutos = (data || []).map(_normalizarMontagemConfig);
   _produtosMap = {};
   _todosProdutos.forEach(p => { _produtosMap[p.id] = p; });
   renderizarCardsProdutos(_todosProdutos);
@@ -3937,7 +3938,11 @@ async function salvarProduto() {
           const img = row.querySelector('[data-f="vimg"]').value.trim() || "";
           const ativoEl = row.querySelector('[data-f="vativo"]');
           const ativo = ativoEl ? ativoEl.checked : true;
-          if (nome) variacoes.push({ nome, preco, img, ativo });
+          const inventarioIdEl = row.querySelector('[data-f="vinventario"]');
+          const inventario_id = inventarioIdEl?.value
+            ? parseInt(inventarioIdEl.value)
+            : null;
+          if (nome) variacoes.push({ nome, preco, img, ativo, inventario_id });
         });
       configFinal.variacoes = variacoes;
     }
@@ -3992,11 +3997,31 @@ async function salvarProduto() {
       somente_balcao:
         document.getElementById("prod-somente-balcao")?.checked || false,
       es_bebida: document.getElementById("prod-es-bebida")?.checked || false,
+      promocao_dia:
+        document.getElementById("prod-promocao-dia")?.checked || false,
       inventario_id: inventarioId,
     };
 
-    if (id) await supa.from("produtos").update(dados).eq("id", id);
-    else await supa.from("produtos").insert([dados]);
+    let _saveResult;
+    if (id) {
+      _saveResult = await supa
+        .from("produtos")
+        .update(dados)
+        .eq("id", id)
+        .select("id");
+    } else {
+      _saveResult = await supa.from("produtos").insert([dados]).select("id");
+    }
+    const { data: _savedRows, error: _saveError } = _saveResult;
+    if (_saveError) {
+      throw new Error(_saveError.message || "Falha ao salvar no banco de dados.");
+    }
+    if (id && (!_savedRows || _savedRows.length === 0)) {
+      // Update "bem-sucedido" sem erro mas sem linhas afetadas = bloqueado por RLS/policy
+      throw new Error(
+        "O produto não foi salvo. Nenhuma linha foi alterada (provável bloqueio de permissão/RLS). Verifique se você tem permissão para editar este produto.",
+      );
+    }
 
     fecharModal("modal-produto");
     carregarProdutos();
@@ -4077,6 +4102,8 @@ async function abrirModalProduto(produto = null, tipoInicial = null) {
   document.getElementById("prod-somente-balcao").checked = false;
   const _esBebidaEl = document.getElementById("prod-es-bebida");
   if (_esBebidaEl) _esBebidaEl.checked = false;
+  const _promoDiaEl = document.getElementById("prod-promocao-dia");
+  if (_promoDiaEl) _promoDiaEl.checked = false;
   document.getElementById("prod-tem-extras").checked = false;
   const _pkgEl = document.getElementById("prod-preco-kg");
   if (_pkgEl) _pkgEl.value = "";
@@ -4147,6 +4174,8 @@ async function abrirModalProduto(produto = null, tipoInicial = null) {
       produto.somente_balcao || false;
     const _esBebidaLoad = document.getElementById("prod-es-bebida");
     if (_esBebidaLoad) _esBebidaLoad.checked = produto.es_bebida || false;
+    const _promoDiaLoad = document.getElementById("prod-promocao-dia");
+    if (_promoDiaLoad) _promoDiaLoad.checked = produto.promocao_dia || false;
     if (produto.inventario_id) {
       const _te = document.getElementById("prod-tem-estoque");
       const _ea = document.getElementById("estoque-area");
@@ -4452,6 +4481,12 @@ function addVariacao(dados = {}) {
         <input data-f="vpreco" type="number" class="form-control" value="${dados.preco || ""}" placeholder="Preço" style="max-width:140px">
       </div>
       <input data-f="vimg" class="form-control" value="${dados.img || ""}" placeholder="URL da foto (opcional — usa foto do produto por padrão)" style="font-size:0.8rem;color:#888">
+      <div style="display:flex;gap:8px;align-items:center">
+        <select data-f="vinventario" class="form-control variacao-inventario-select" style="font-size:0.8rem;max-width:220px" onchange="_atualizarBadgeEstoqueVariacao(this)">
+          <option value="">— Sem controle de estoque —</option>
+        </select>
+        <span class="variacao-estoque-badge" style="font-size:0.75rem;color:#888;white-space:nowrap"></span>
+      </div>
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.82rem;color:${pausado ? "#c0392b" : "#16a34a"}">
         <input data-f="vativo" type="checkbox" ${!pausado ? "checked" : ""} onchange="this.closest('.variacao-row').style.background=this.checked?'#fff':'#fff5f5';this.closest('.variacao-row').style.opacity=this.checked?'1':'0.7';this.closest('.variacao-row').style.borderColor=this.checked?'#e9d5ff':'#fca5a5';this.parentElement.style.color=this.checked?'#16a34a':'#c0392b';this.parentElement.lastChild.textContent=this.checked?' Disponível':' Pausado'">
         <span>${pausado ? " Pausado" : " Disponível"}</span>
@@ -4463,6 +4498,47 @@ function addVariacao(dados = {}) {
     <button class="btn btn-sm btn-danger" onclick="this.closest('.variacao-row').remove()" title="Remover" style="align-self:start">✕</button>
   `;
   lista.appendChild(row);
+  const _selVinv = row.querySelector('[data-f="vinventario"]');
+  _carregarSelectVariacaoInventario(_selVinv, dados.inventario_id || null);
+}
+
+// Preenche o <select> de estoque de UMA linha de variação com os itens do inventário.
+// Reaproveita o mesmo padrão usado em _carregarSelectInventario, mas aceita
+// qualquer elemento <select> (necessário pois existem N linhas de variação).
+async function _carregarSelectVariacaoInventario(selectEl, selectedId = null) {
+  if (!selectEl) return;
+  const { data, error } = await supa
+    .from("inventario")
+    .select("id, nome, quantidade, unidade")
+    .order("nome");
+  if (error) {
+    console.warn("Erro ao carregar inventário para variação:", error.message);
+    return;
+  }
+  selectEl.innerHTML = '<option value="">— Sem controle de estoque —</option>';
+  (data || []).forEach((i) => {
+    const opt = document.createElement("option");
+    opt.value = i.id;
+    opt.textContent = `${i.nome} (${i.quantidade ?? 0} ${i.unidade || "un"})`;
+    if (selectedId && i.id == selectedId) opt.selected = true;
+    selectEl.appendChild(opt);
+  });
+  _atualizarBadgeEstoqueVariacao(selectEl);
+}
+
+// Atualiza o texto "(X un em estoque)" ao lado do select da variação
+function _atualizarBadgeEstoqueVariacao(selectEl) {
+  const badge = selectEl
+    ?.closest(".variacao-row")
+    ?.querySelector(".variacao-estoque-badge");
+  if (!badge) return;
+  const opt = selectEl.options[selectEl.selectedIndex];
+  if (!opt || !opt.value) {
+    badge.textContent = "";
+    return;
+  }
+  const match = opt.textContent.match(/\(([^)]+)\)$/);
+  badge.textContent = match ? match[1] : "";
 }
 
 // ─── PIZZA BUILDER (tipos dinâmicos) ───────────────────────────
@@ -5009,6 +5085,7 @@ async function duplicarProduto(id) {
   delete copia.updated_at;
   copia.nome = `(Cópia) ${p.nome}`;
   copia.ativo = false; // entra como pausado para revisão
+  _normalizarMontagemConfig(copia); // evita duplicar montagem_config corrompido (string dupla)
   const { error: errIns } = await supa.from("produtos").insert([copia]);
   if (errIns) {
     alert("Erro ao duplicar: " + errIns.message);
@@ -7760,7 +7837,7 @@ async function carregarPDV() {
     .or("pausado.is.null,pausado.eq.false")
     .order("categoria_slug")
     .order("nome");
-  produtosCachePDV = data || [];
+  produtosCachePDV = (data || []).map(_normalizarMontagemConfig);
 
   // Carrega categorias para exibir no PDV
   const { data: cats } = await supa
@@ -8066,6 +8143,27 @@ function _deveMostrarExtrasGlobais(produto) {
   return !_CATS_SEM_EXTRAS_GLOBAIS.some((c) => cat.includes(c));
 }
 
+// Recebe uma lista de variações (já filtradas por ativo!==false) e retorna
+// apenas as que têm estoque disponível. Variações sem inventario_id vinculado
+// são consideradas sempre disponíveis (sem controle de estoque).
+async function _filtrarVariacoesComEstoque(variacoes) {
+  const invIds = [
+    ...new Set(variacoes.map((v) => v.inventario_id).filter(Boolean)),
+  ];
+  if (!invIds.length) return variacoes; // nenhuma variação controla estoque
+  const { data: estoques, error } = await supa
+    .from("inventario")
+    .select("id, quantidade")
+    .in("id", invIds);
+  if (error || !estoques) return variacoes; // falha ao consultar: não bloqueia a venda
+  const mapaQtd = {};
+  estoques.forEach((e) => (mapaQtd[e.id] = e.quantidade ?? 0));
+  return variacoes.filter((v) => {
+    if (!v.inventario_id) return true;
+    return (mapaQtd[v.inventario_id] ?? 0) > 0;
+  });
+}
+
 function adicionarItemPDV(p) {
   // montagem_config pode chegar como string JSON de bancos antigos
   let cfg = p.montagem_config;
@@ -8091,7 +8189,16 @@ function adicionarItemPDV(p) {
       alert("⏸️ Todas as variações estão pausadas.");
       return;
     }
-    _mostrarModalOpcoesPDV(p, "variacoes");
+    // Consulta estoque atual de cada variação vinculada a um item de inventário
+    // e bloqueia (oculta) as que estiverem zeradas.
+    _filtrarVariacoesComEstoque(ativas).then((disponiveis) => {
+      if (!disponiveis.length) {
+        alert("📦 Todas as variações estão sem estoque no momento.");
+        return;
+      }
+      const cfgComEstoque = { ...cfg, variacoes: disponiveis };
+      _mostrarModalOpcoesPDV({ ...p, montagem_config: cfgComEstoque }, "variacoes");
+    });
     return;
   }
   if (tipo === "pizza") {
@@ -8187,26 +8294,24 @@ function _mostrarModalOpcoesPDV(produto, tipo) {
   const corpo = () => modal.querySelector("#_pdv-modal-corpo");
 
   // ── VARIAÇÕES ────────────────────────────────────────────────
-if (tipo === "variacoes") {
-  // Manter o índice ORIGINAL de cada variação, mesmo após filtrar
-  const ativasComIndice = (cfg.variacoes || [])
-    .map((v, idx) => ({ ...v, idxOriginal: idx }))
-    .filter((v) => v.ativo !== false);
-
-  corpo().innerHTML = `<p style="font-size:0.82rem;color:#555;margin-bottom:10px;font-weight:600">Escolha a variação:</p>
-    <div style="display:flex;flex-direction:column;gap:8px">
-      ${ativasComIndice
-        .map((v, i) => `
-          <label style="display:flex;align-items:center;gap:12px;border:2px solid ${i === 0 ? "var(--primary)" : "#e5e7eb"};border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s"
+  if (tipo === "variacoes") {
+    const ativas = (cfg.variacoes || []).filter((v) => v.ativo !== false);
+    corpo().innerHTML = `<p style="font-size:0.82rem;color:#555;margin-bottom:10px;font-weight:600">Escolha a variação:</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${ativas
+          .map(
+            (v, i) => `
+          <label style="display:flex;align-items:center;gap:12px;border:2px solid #e5e7eb;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s"
             onclick="this.closest('div').querySelectorAll('label').forEach(l=>l.style.borderColor='#e5e7eb');this.style.borderColor='var(--primary)';this.style.background='#f0fff4'">
-            <input type="radio" name="_pdv_var" value="${v.idxOriginal}" ${i === 0 ? "checked" : ""} style="width:18px;height:18px">
+            <input type="radio" name="_pdv_var" value="${i}" style="width:18px;height:18px" ${i === 0 ? "checked" : ""}>
             ${v.img || produto.imagem_url ? `<img src="${v.img || produto.imagem_url}" style="width:44px;height:44px;border-radius:8px;object-fit:cover" onerror="this.style.display='none'">` : ""}
             <div style="flex:1"><div style="font-weight:700;font-size:0.9rem">${v.nome}</div></div>
             <div style="font-weight:700;color:var(--primary)">Gs ${(v.preco || produto.preco || 0).toLocaleString("es-PY")}</div>
-          </label>`)
-        .join("")}
-    </div>`;
-}
+          </label>`,
+          )
+          .join("")}
+      </div>`;
+  }
 
   // ── PIZZA ────────────────────────────────────────────────────
   else if (tipo === "pizza") {
@@ -8684,6 +8789,7 @@ function _pdvModalConfirmar(cacheKey) {
   const montagem = [];
   let variacaoLabel = "";
 
+  let variacaoInventarioId = null;
   if (tipo === "variacoes") {
     const idx = parseInt(
       modal.querySelector('input[name="_pdv_var"]:checked')?.value ?? 0,
@@ -8692,6 +8798,7 @@ function _pdvModalConfirmar(cacheKey) {
     if (v) {
       preco = v.preco || preco;
       variacaoLabel = v.nome;
+      variacaoInventarioId = v.inventario_id || null;
     }
   } else if (tipo === "pizza") {
     const tamIdx = parseInt(
@@ -8826,9 +8933,11 @@ function _pdvModalConfirmar(cacheKey) {
     img: produto.imagem_url,
     categoria_slug: produto.categoria_slug || "",
     es_bebida: produto.es_bebida || false,
+    promocao_dia: produto.promocao_dia || false,
     preco,
     qtd: 1,
     variacao: variacaoLabel,
+    variacao_inventario_id: variacaoInventarioId,
     montagem,
     obs,
   });
@@ -9208,6 +9317,7 @@ function _mostrarModalPesoPDV(produto, precoKg) {
       img: produto.imagem_url || "",
       categoria_slug: produto.categoria_slug || "",
       es_bebida: produto.es_bebida || false,
+      promocao_dia: produto.promocao_dia || false,
       montagem: [],
       obs: "",
     });
@@ -9355,6 +9465,7 @@ function _mostrarModalVariacaoPDV(produto, variacoes) {
           img: p.imagem_url,
           categoria_slug: p.categoria_slug || "",
           es_bebida: p.es_bebida || false,
+          promocao_dia: p.promocao_dia || false,
           preco: v.preco || p.preco || 0,
           qtd: 1,
           variacao: v.nome,
@@ -10219,6 +10330,7 @@ async function salvarPedidoBalcao() {
     obs: i.obs || "",
     categoria_slug: i.categoria_slug || "",
     es_bebida: i.es_bebida || false,
+    promocao_dia: i.promocao_dia || false,
     ...(i._isKg
       ? { peso_gramas: i.peso_gramas, preco_kg: i.preco_kg, _isKg: true }
       : {}),
@@ -10346,65 +10458,39 @@ async function salvarPedidoBalcao() {
   // ── Mensalista: desconta saldo financeiro (e kg se tiver) ─────
   if (pag === "Mensalista" && _pdvMensalistaSel) {
   const pm = _pdvMensalistaSel;
-  const totalVenda = subtotalLiquido; // sem frete
+  const totalVenda = subtotalLiquido; // sem frete para mensalista
   const isKg = (pm.produto_nome || "").toLowerCase().includes("kg");
-
-  // Desconta valor
+  // Desconta valor (permite negativo)
   const novoValorRestante = Math.round((pm.valor_restante || 0) - totalVenda);
-
-  // Desconta quantidade
+  // Desconta kg se o carrinho tiver item kg do plano dele
   let novaQtdRestante = pm.quantidade_restante;
   if (isKg) {
     const totalGramas = novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0);
-    novaQtdRestante = pm.quantidade_restante - totalGramas;
+    novaQtdRestante = pm.quantidade_restante - totalGramas; // pode ficar negativo
   } else {
     const totalUn = novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0);
-    novaQtdRestante = pm.quantidade_restante - totalUn;
+    novaQtdRestante = pm.quantidade_restante - totalUn; // pode ficar negativo
   }
-
-  // Atualiza no banco com tratamento de erro
-  try {
-    const { error: errPlano } = await supa
-      .from("planos_mensalistas")
-      .update({
-        valor_restante: novoValorRestante,
-        quantidade_restante: novaQtdRestante
-      })
-      .eq("id", pm.id);
-
-    if (errPlano) {
-      console.error("Erro ao atualizar plano mensalista:", errPlano);
-      alert("Erro ao atualizar saldo do plano. Verifique manualmente.");
-    } else {
-      // Atualiza cache local
-      pm.valor_restante = novoValorRestante;
-      pm.quantidade_restante = novaQtdRestante;
-
-      const idx = _pdvMensalistas.findIndex(p => p.id === pm.id);
-      if (idx !== -1) {
-        _pdvMensalistas[idx].valor_restante = novoValorRestante;
-        _pdvMensalistas[idx].quantidade_restante = novaQtdRestante;
-      }
-
-      // Registra entrega no histórico (com itens extras)
-      await supa.from("mensalista_entregas").insert([{
-        plano_id: pm.id,
-        cliente_id: pm.clientes?.id || null,
-        produto_nome: pm.produto_nome,
-        quantidade: isKg
-          ? novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0)
-          : novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0),
-        observacoes: `PDV #${novoPedido.id}`,
-        itens_extras: novosItens.length > 0 ? novosItens : null,
-        valor_extras: Math.round(subtotalLiquido)
-      }]);
-    }
-  } catch (e) {
-    console.error("Exceção ao processar mensalista:", e);
-    alert("Erro inesperado ao atualizar plano. Contate o suporte.");
-  }
-
-  // Venda mensalista NÃO entra no financeiro
+  await supa.from("planos_mensalistas")
+    .update({ valor_restante: novoValorRestante, quantidade_restante: novaQtdRestante })
+    .eq("id", pm.id);
+  // Registrar entrega no histórico com itens_extras
+  const totalExtras = subtotalLiquido; // ou 0, tanto faz
+  await supa.from("mensalista_entregas").insert([{
+    plano_id: pm.id,
+    cliente_id: pm.clientes?.id || null,
+    produto_nome: pm.produto_nome,
+    quantidade: isKg
+      ? novosItens.filter(i => i._isKg).reduce((s, i) => s + (i.peso_gramas || 0), 0)
+      : novosItens.filter(i => !i._isKg).reduce((s, i) => s + (i.qtd || 1), 0),
+    observacoes: `PDV #${novoPedido.id}`,
+    itens_extras: novosItens.length > 0 ? novosItens : null,
+    valor_extras: Math.round(subtotalLiquido), // ou null
+  }]);
+  // Atualiza cache local
+  _pdvMensalistaSel.valor_restante   = novoValorRestante;
+  _pdvMensalistaSel.quantidade_restante = novaQtdRestante;
+  // Venda mensalista NÃO entra no financeiro — pula movimentacao_caixa
   _pdvPularMovimentacao = true;
 }
 
@@ -11720,24 +11806,37 @@ function _todosBebidas(itens) {
 async function _descontarEstoqueVendaItens(itens) {
   try {
     if (!itens?.length) return;
+    // Itens com variação vinculada a um inventario_id próprio usam esse id
+    // diretamente; os demais caem no inventario_id de nível-produto (padrão antigo).
+    const itensComVariacaoEstoque = itens.filter((i) => i.variacao_inventario_id);
+    const itensSemVariacaoEstoque = itens.filter((i) => !i.variacao_inventario_id);
+
     const prodIds = [
-      ...new Set(itens.map((i) => i.id || i.produto_id).filter(Boolean)),
+      ...new Set(
+        itensSemVariacaoEstoque.map((i) => i.id || i.produto_id).filter(Boolean),
+      ),
     ];
-    if (!prodIds.length) return;
-    const { data: prods } = await supa
-      .from("produtos")
-      .select("id, inventario_id")
-      .in("id", prodIds)
-      .not("inventario_id", "is", null);
-    if (!prods?.length) return;
+    const { data: prods } = prodIds.length
+      ? await supa
+          .from("produtos")
+          .select("id, inventario_id")
+          .in("id", prodIds)
+          .not("inventario_id", "is", null)
+      : { data: [] };
+
     const descontos = {};
-    itens.forEach((item) => {
+    itensComVariacaoEstoque.forEach((item) => {
+      descontos[item.variacao_inventario_id] =
+        (descontos[item.variacao_inventario_id] || 0) + (item.qtd || 1);
+    });
+    itensSemVariacaoEstoque.forEach((item) => {
       const pid = item.id || item.produto_id;
-      const prod = prods.find((p) => p.id == pid);
+      const prod = prods?.find((p) => p.id == pid);
       if (!prod) return;
       descontos[prod.inventario_id] =
         (descontos[prod.inventario_id] || 0) + (item.qtd || 1);
     });
+    if (!Object.keys(descontos).length) return;
     const invIds = Object.keys(descontos).map(Number);
     const { data: estoques } = await supa
       .from("inventario")
@@ -11784,25 +11883,37 @@ async function _descontarEstoqueVenda(pedidoId, itensDireto) {
       itens = pedido?.itens;
     }
     if (!itens?.length) return;
-    // Busca produto_ids
+    // Itens com variação vinculada a um inventario_id próprio usam esse id
+    // diretamente; os demais caem no inventario_id de nível-produto (padrão antigo).
+    const itensComVariacaoEstoque = itens.filter((i) => i.variacao_inventario_id);
+    const itensSemVariacaoEstoque = itens.filter((i) => !i.variacao_inventario_id);
+
     const prodIds = [
-      ...new Set(itens.map((i) => i.produto_id || i.id).filter(Boolean)),
+      ...new Set(
+        itensSemVariacaoEstoque.map((i) => i.produto_id || i.id).filter(Boolean),
+      ),
     ];
-    if (!prodIds.length) return;
-    const { data: prods } = await supa
-      .from("produtos")
-      .select("id, inventario_id")
-      .in("id", prodIds)
-      .not("inventario_id", "is", null);
-    if (!prods?.length) return;
+    const { data: prods } = prodIds.length
+      ? await supa
+          .from("produtos")
+          .select("id, inventario_id")
+          .in("id", prodIds)
+          .not("inventario_id", "is", null)
+      : { data: [] };
+
     const descontos = {};
-    itens.forEach((item) => {
+    itensComVariacaoEstoque.forEach((item) => {
+      descontos[item.variacao_inventario_id] =
+        (descontos[item.variacao_inventario_id] || 0) + (item.qtd || item.q || 1);
+    });
+    itensSemVariacaoEstoque.forEach((item) => {
       const pid = item.produto_id || item.id;
-      const prod = prods.find((p) => p.id == pid);
+      const prod = prods?.find((p) => p.id == pid);
       if (!prod) return;
       descontos[prod.inventario_id] =
         (descontos[prod.inventario_id] || 0) + (item.qtd || item.q || 1);
     });
+    if (!Object.keys(descontos).length) return;
     const invIds = Object.keys(descontos).map(Number);
     const { data: estoques } = await supa
       .from("inventario")
@@ -12260,6 +12371,24 @@ function toggleEstoqueProduto() {
   if (!area) return;
   area.style.display = checked ? "block" : "none";
   if (checked) _carregarSelectInventario();
+}
+
+// Toggle "Ativar estoque por variação" — liga/desliga o controle de estoque
+// individual de cada linha de variação (select + badge que já ficam sempre
+// no DOM, adicionados por addVariacao()). Usa event.target (mesmo padrão já
+// usado em salvarProduto()) para não depender de um id fixo de checkbox.
+function toggleVariacoesEstoque() {
+  const checked = !!event?.target?.checked;
+  document
+    .querySelectorAll("#variacoes-lista .variacao-row select[data-f='vinventario']")
+    .forEach((sel) => {
+      const wrapper = sel.closest("div");
+      if (wrapper) wrapper.style.display = checked ? "flex" : "none";
+      if (!checked) {
+        sel.value = "";
+        _atualizarBadgeEstoqueVariacao(sel);
+      }
+    });
 }
 // =========================================
 // FRETE PDV — ROTA REAL (OSRM)

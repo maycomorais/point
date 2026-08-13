@@ -79,7 +79,7 @@ function _estRender() {
   const filtCat     = (document.getElementById('est-filtro-cat')?.value   || '').toLowerCase().trim();
   const filtUnidade = (document.getElementById('est-filtro-unidade')?.value || '');
 
-  // ── Mapa nome→categoria para lookup
+  // ── Mapa nome→categoria para lookup (ignora variação)
   const mapCat = {};
   _est_produtos.forEach(p => {
     mapCat[(p.nome || '').toLowerCase()] = {
@@ -88,13 +88,16 @@ function _estRender() {
     };
   });
 
-  // ── Agrega itens de todos os pedidos
-  const agrupado = {};  // chave: nome do produto
+  // ── Agrega itens de todos os pedidos, usando chave composta: nome|variação
+  const agrupado = {};  // chave: "nome|variação" ou apenas "nome"
 
   _est_pedidos.forEach(pedido => {
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
     itens.forEach(item => {
-      const nome     = item.nome || item.n || 'Desconhecido';
+      const nome      = item.nome || item.n || 'Desconhecido';
+      const variacao  = item.variacao || item.t || '';
+      const chave     = variacao ? `${nome}|${variacao}` : nome;
+
       const isKg     = item._isKg || item.peso_gramas > 0;
       const qtd      = isKg ? 0 : (item.qtd || item.q || 1);
       const pesoG    = isKg ? (item.peso_gramas || 0) : 0;
@@ -110,22 +113,30 @@ function _estRender() {
       if (filtUnidade === 'kg' && !isKg) return;
       if (filtUnidade === 'un' && isKg) return;
 
-      if (!agrupado[nome]) {
-        agrupado[nome] = { nome, categoria, unidade, qtd: 0, pesoG: 0, faturamento: 0 };
+      if (!agrupado[chave]) {
+        agrupado[chave] = {
+          nome,
+          variacao,
+          categoria,
+          unidade,
+          qtd: 0,
+          pesoG: 0,
+          faturamento: 0,
+        };
       }
-      agrupado[nome].qtd        += qtd;
-      agrupado[nome].pesoG      += pesoG;
-      agrupado[nome].faturamento += total;
+      agrupado[chave].qtd        += qtd;
+      agrupado[chave].pesoG      += pesoG;
+      agrupado[chave].faturamento += total;
     });
   });
 
   const produtos = Object.values(agrupado);
 
-  // ── KPIs globais
+  // ── KPIs globais (não mudam)
   const faturamentoTotal = _est_pedidos.reduce((s, p) => s + (p.total_geral || 0), 0);
   const ticketMedio      = _est_pedidos.length ? faturamentoTotal / _est_pedidos.length : 0;
 
-  // Lucro estimado: usa fichas técnicas quando disponível, fallback markup médio
+  // ── Lucro estimado: usa ficha técnica do produto base (ignora variação)
   let lucroTotal = 0;
   produtos.forEach(prod => {
     const ficha = _est_fichas.find(f =>
@@ -139,7 +150,6 @@ function _estRender() {
       const margemPct = markup / (100 + markup);
       lucroTotal += prod.faturamento * margemPct;
     } else {
-      // fallback: assume margem 50% se não houver ficha
       lucroTotal += prod.faturamento * 0.5;
     }
   });
@@ -150,10 +160,10 @@ function _estRender() {
   _estSetKPI('est-kpi-lucro',       `Gs ${Math.round(lucroTotal).toLocaleString('es-PY')}`);
   _estSetKPI('est-kpi-pedidos',     _est_pedidos.length.toLocaleString('es-PY'));
 
-  // ── Tabela de produtos
+  // ── Tabela de produtos (com variação)
   _estRenderTabela(produtos);
 
-  // ── Gráfico de barras (top 15 por faturamento)
+  // ── Gráfico de barras (top 15 por faturamento, com nome+variação)
   _estRenderGrafico(produtos);
 }
 
@@ -171,10 +181,15 @@ function _estRenderTabela(produtos) {
     return;
   }
 
-  // Ordena alfabeticamente
-  const sorted = [...produtos].sort((a, b) => a.nome.localeCompare(b.nome));
+  // Ordena alfabeticamente pelo nome completo (nome + variação)
+  const sorted = [...produtos].sort((a, b) => {
+    const nomeA = a.variacao ? `${a.nome} (${a.variacao})` : a.nome;
+    const nomeB = b.variacao ? `${b.nome} (${b.variacao})` : b.nome;
+    return nomeA.localeCompare(nomeB);
+  });
 
   tbody.innerHTML = sorted.map(p => {
+    const nomeExib = p.variacao ? `${p.nome} (${p.variacao})` : p.nome;
     const qtdExib = p.unidade === 'kg'
       ? (p.pesoG >= 1000
           ? `${(p.pesoG / 1000).toFixed(2)} kg`
@@ -186,7 +201,7 @@ function _estRenderTabela(produtos) {
 
     return `
       <tr>
-        <td style="font-weight:600">${p.nome}</td>
+        <td style="font-weight:600">${nomeExib}</td>
         <td style="color:#666;font-size:0.83rem">${p.categoria || '—'}</td>
         <td style="text-align:center;font-weight:700">${qtdExib}</td>
         <td style="text-align:center;font-size:0.83rem;color:#2980b9">${markupExib}</td>
@@ -201,18 +216,19 @@ function _estRenderGrafico(produtos) {
   const canvas = document.getElementById('est-grafico');
   if (!canvas || typeof Chart === 'undefined') return;
 
-  // Destrói instância anterior
   if (_est_chartInst) { _est_chartInst.destroy(); _est_chartInst = null; }
 
-  // Top 15 por faturamento
+  // Top 15 por faturamento, com nome + variação
   const top = [...produtos]
     .sort((a, b) => b.faturamento - a.faturamento)
     .slice(0, 15);
 
+  const labels = top.map(p => p.variacao ? `${p.nome} (${p.variacao})` : p.nome);
+
   _est_chartInst = new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: top.map(p => p.nome),
+      labels: labels,
       datasets: [{
         label: 'Faturamento (Gs)',
         data:  top.map(p => Math.round(p.faturamento)),

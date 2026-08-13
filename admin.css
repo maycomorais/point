@@ -767,8 +767,11 @@ select.form-control, select.input-modern {
 
 /* ── Right column: Order ────────────────────────────────── */
 .pdv-col-dir {
-    display: flex; flex-direction: column;
-    background: #fff; overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  height: 100%;
 }
 .pdv-dir-titulo {
     padding: 9px 10px 7px;
@@ -823,10 +826,10 @@ select.form-control, select.input-modern {
 
 /* Totais + pagamento — scroll próprio, nunca empurra o footer */
 .pdv-dir-bottom-scroll {
-    overflow-y: auto;
-    scrollbar-width: thin;
-    flex-shrink: 0;
-    max-height: 52vh;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;          /* importante para o flex não vazar */
+  scrollbar-width: thin;
 }
 .pdv-dir-table th.tc { text-align: center; }
 .pdv-dir-table th.tr { text-align: right; }
@@ -864,8 +867,16 @@ select.form-control, select.input-modern {
 
 /* Action buttons */
 .pdv-dir-footer {
-    display: flex; gap: 6px;
-    padding: 7px 8px; border-top: 1px solid #ddd; flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  z-index: 10;
+  padding: 8px 12px;
+  border-top: 1px solid #e0e0e0;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  box-shadow: 0 -4px 10px rgba(0, 0, 0, 0.05);
 }
 .pdv-btn-cancelar {
     padding: 9px 10px; background: #ffeaea; color: #c0392b;
@@ -1942,59 +1953,94 @@ select.form-control, select.input-modern {
 }
 /* ── Mesas Ativas no PDV ─────────────────────────────────── */
 .pdv-mesas-bar {
-    grid-column: 1 / -1;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 0 8px;
-    border-bottom: 1px solid #e9ecef;
-    margin-bottom: 8px;
-    min-height: 48px;
-    align-items: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #f9f9f9;
+  border-bottom: 1px solid #eee;
+  font-size: 0.75rem;
+  color: #666;
+  flex-shrink: 0;
+  min-height: 32px;
+  flex-wrap: wrap;
 }
 
-.pdv-mesas-label {
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: #6c757d;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-    margin-right: 4px;
+.pdv-mesas-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #888;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.pdv-mesas-toggle:hover {
+  background: #e8e8e8;
+}
+
+#pdv-mesas-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  overflow: hidden;
+  max-height: 200px;
+  opacity: 1;
+}
+#pdv-mesas-list.collapsed {
+  max-height: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
 }
 
 .mesa-chip {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 44px;
-    height: 44px;
-    padding: 4px 10px;
-    border-radius: 8px;
-    background: var(--primary);
-    color: white;
-    font-weight: 700;
-    font-size: 0.85rem;
-    cursor: pointer;
-    border: 2px solid transparent;
-    box-shadow: 0 2px 6px rgba(255,68,31,0.3);
-    transition: all 0.15s;
-    line-height: 1.1;
-    text-align: center;
-    flex-direction: column;
-    gap: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--primary);
+  color: white;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  border: none;
+  transition: opacity 0.15s, transform 0.1s;
 }
-
 .mesa-chip:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(255,68,31,0.4);
-    border-color: rgba(255,255,255,0.3);
+  opacity: 0.85;
+  transform: scale(1.02);
+}
+.mesa-chip.mesa-pronto {
+  background: #27ae60;
+}
+.mesa-chip.mesa-em-preparo {
+  background: #e67e22;
+}
+.mesa-chip .mesa-chip-num {
+  font-weight: 800;
+  margin-right: 2px;
+}
+.mesa-chip .mesa-chip-status {
+  font-size: 0.6rem;
+  opacity: 0.85;
 }
 
-.mesa-chip.mesa-pronto {
-    background: #27ae60;
-    box-shadow: 0 2px 6px rgba(39,174,96,0.4);
-    animation: pulse-green 1.5s infinite;
+.mesa-chip-cliente {
+  font-size: 0.65rem;
+  font-weight: 600;
+  opacity: 0.9;
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
 }
 
 .mesa-chip.mesa-em-preparo {

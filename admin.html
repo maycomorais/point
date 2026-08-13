@@ -547,7 +547,7 @@
                   </div>
                   <div style="flex:1">
                     <label class="pdv-dir-label" data-i18n="crm.tabela_cliente">Cliente</label>
-                    <input type="text" id="balcao-cliente" class="pdv-dir-input" data-i18n-ph="pdv.nome_ph" placeholder="Nome" />
+                    <input type="text" id="balcao-cliente" class="pdv-dir-input" data-i18n-ph="pdv.nome_ph" placeholder="Nome" oninput="pdvNomeInput()" />
                   </div>
                 </div>
                 <div>
@@ -838,12 +838,12 @@
   <div id="fin-filtros-gestor" class="filtro-bar">
     <div class="filtro-group">
       <label><i class="far fa-calendar-alt"></i> Início</label>
-      <input type="date" id="fin-inicio" />
+      <input type="date" id="fin-inicio" onchange="_finMarcarFiltroManual()" />
     </div>
 
     <div class="filtro-group">
       <label><i class="far fa-calendar-alt"></i> Fim</label>
-      <input type="date" id="fin-fim" />
+      <input type="date" id="fin-fim" onchange="_finMarcarFiltroManual()" />
     </div>
 
     <div class="filtro-group">
@@ -1772,11 +1772,12 @@
               <label><i class="fas fa-percentage"></i> <span data-i18n="cfg.tipo_desconto">Tipo de Desconto</span></label>
               <select id="cupom-tipo" class="input-modern" onchange="alterarTipoCupom()">
                 <option value="percentual" data-i18n="cfg.desconto_percentual_opcao">Desconto Percentual (%)</option>
+                <option value="fixo" data-i18n="cfg.desconto_fixo_opcao">Valor Fixo (Gs)</option>
                 <option value="frete" data-i18n="cfg.frete_gratis_opcao">Frete Grátis</option>
               </select>
             </div>
             <div class="form-group-modern" id="box-valor-cupom">
-              <label><i class="fas fa-percent"></i> <span data-i18n="cfg.valor_desconto_pct">Valor do Desconto (%)</span></label>
+              <label><i class="fas fa-percent" id="icon-valor-cupom"></i> <span id="label-valor-cupom" data-i18n="cfg.valor_desconto_pct">Valor do Desconto (%)</span></label>
               <input type="number" id="cupom-valor" class="input-modern" placeholder="Ex: 10" min="0" max="100">
             </div>
             <div class="form-group-modern">
@@ -2047,7 +2048,7 @@
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
             <div>
               <label style="font-size:0.78rem;font-weight:600;color:#555;display:block;margin-bottom:4px" data-i18n="crm.sobre_pedido">% sobre o pedido</label>
-              <input type="number" id="crm-cfg-pct" class="form-control" style="width:100px" min="0" max="100" step="0.1" value="10">
+              <input type="number" id="crm-cfg-pct" class="form-control" style="width:100px" min="0" max="100" step="0.5">
             </div>
             <div>
               <label style="font-size:0.78rem;font-weight:600;color:#555;display:block;margin-bottom:4px" data-i18n="crm.validade">Validade (dias)</label>
@@ -2202,6 +2203,18 @@
               <option value="todos">📋 Todos</option>
             </select>
           </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+            <label style="font-size:0.8rem;color:#6b7280;font-weight:600">Período (data do pedido):</label>
+            <input id="notas-filtro-inicio" type="date" onchange="notasAplicarFiltroPeriodo()"
+              style="padding:8px 11px;border:1.5px solid #e5e7eb;border-radius:9px;font-size:0.85rem;outline:none">
+            <span style="color:#9ca3af;font-size:0.85rem">até</span>
+            <input id="notas-filtro-fim" type="date" onchange="notasAplicarFiltroPeriodo()"
+              style="padding:8px 11px;border:1.5px solid #e5e7eb;border-radius:9px;font-size:0.85rem;outline:none">
+            <button onclick="notasLimparFiltroPeriodo()"
+              style="padding:8px 13px;background:#f3f4f6;color:#374151;border:1.5px solid #e5e7eb;border-radius:9px;font-weight:600;font-size:0.8rem;cursor:pointer">
+              ✕ Limpar período
+            </button>
+          </div>
 
           <!-- Loading -->
           <div id="notas-loading" style="display:none;justify-content:center;padding:30px">
@@ -2284,6 +2297,13 @@
           <label for="prod-es-bebida" style="font-weight:bold; cursor:pointer;">
             🥤 <span data-i18n="prod.es_bebida">É uma bebida</span>
             <small style="display:block; font-weight:normal; color:#888;" data-i18n="prod.es_bebida_desc">Aparece destacado na mensagem do motoboy (LEVAR)</small>
+          </label>
+        </div>
+        <div class="form-group" style="display:flex; align-items:center; gap:10px; background:#ffe9e6; padding:10px; border-radius:8px;">
+          <input type="checkbox" id="prod-promocao-dia" style="width:20px; height:20px;">
+          <label for="prod-promocao-dia" style="font-weight:bold; cursor:pointer;">
+            🔥 <span data-i18n="prod.promocao_dia">Promoção do Dia</span>
+            <small style="display:block; font-weight:normal; color:#888;" data-i18n="prod.promocao_dia_desc">Pagamento restrito a Efetivo, Pix ou Transferência (independe da categoria)</small>
           </label>
         </div>
 

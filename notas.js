@@ -82,7 +82,7 @@ function notasAgrupar() {
 
 // ── KPIs ──────────────────────────────────────────────────────
 function notasRenderKPIs() {
-  const clientes = Object.values(_notas_clientes);
+  const clientes = _notasClientesComPeriodoEBusca();
   const totalAberto = clientes.reduce((s, c) => s + c.total, 0);
   const totalQuit   = clientes.reduce((s, c) => s + c.quitado, 0);
   const qtdAbertos  = clientes.filter(c => c.total > 0).length;
@@ -100,21 +100,69 @@ function notasFiltrar() {
   notasRenderLista();
 }
 
+// Reaplica os filtros de período (data inicial/final) — dispara recálculo
+// dos KPIs (que também respeitam o período) e da lista.
+function notasAplicarFiltroPeriodo() {
+  notasRenderKPIs();
+  notasRenderLista();
+}
+
+function notasLimparFiltroPeriodo() {
+  const ini = document.getElementById('notas-filtro-inicio');
+  const fim = document.getElementById('notas-filtro-fim');
+  if (ini) ini.value = '';
+  if (fim) fim.value = '';
+  notasAplicarFiltroPeriodo();
+}
+
+// Aplica período (data do pedido) + busca (nome/telefone) sobre
+// _notas_clientes, recalculando total/quitado de cada cliente só com
+// os pedidos que caem dentro da janela filtrada. Não aplica o filtro de
+// status (pendente/quitado/todos) — esse é usado só para decidir quais
+// linhas exibir na lista, os KPIs continuam representando o período todo.
+function _notasClientesComPeriodoEBusca() {
+  const busca = (document.getElementById('notas-busca')?.value || '').toLowerCase().trim();
+  const dtIni = document.getElementById('notas-filtro-inicio')?.value || '';
+  const dtFim = document.getElementById('notas-filtro-fim')?.value || '';
+
+  let clientes = Object.entries(_notas_clientes).map(([chave, c]) => ({
+    chave, ...c, pedidos: [...c.pedidos],
+  }));
+
+  if (dtIni || dtFim) {
+    const iniMs = dtIni ? new Date(dtIni + 'T00:00:00').getTime() : -Infinity;
+    const fimMs = dtFim ? new Date(dtFim + 'T23:59:59').getTime() : Infinity;
+    clientes = clientes
+      .map(c => {
+        const pedidos = c.pedidos.filter(p => {
+          const t = new Date(p.created_at).getTime();
+          return t >= iniMs && t <= fimMs;
+        });
+        const total   = pedidos.filter(p => !p.quitado).reduce((s, p) => s + (p.total_geral || 0), 0);
+        const quitado = pedidos.filter(p => p.quitado).reduce((s, p) => s + (p.total_geral || 0), 0);
+        return { ...c, pedidos, total, quitado };
+      })
+      .filter(c => c.pedidos.length > 0);
+  }
+
+  if (busca) {
+    clientes = clientes.filter(c =>
+      c.nome.toLowerCase().includes(busca) || c.telefone.includes(busca)
+    );
+  }
+
+  return clientes;
+}
+
 function notasRenderLista() {
   const cont = document.getElementById('notas-lista');
   if (!cont) return;
 
-  const busca = (document.getElementById('notas-busca')?.value || '').toLowerCase().trim();
-  let clientes = Object.entries(_notas_clientes).map(([chave, c]) => ({ chave, ...c }));
+  let clientes = _notasClientesComPeriodoEBusca();
 
   // Filtro status
   if (_notas_filtro === 'pendente') clientes = clientes.filter(c => c.total > 0);
   if (_notas_filtro === 'quitado')  clientes = clientes.filter(c => c.total === 0 && c.quitado > 0);
-
-  // Filtro busca
-  if (busca) clientes = clientes.filter(c =>
-    c.nome.toLowerCase().includes(busca) || c.telefone.includes(busca)
-  );
 
   if (!clientes.length) {
     cont.innerHTML = `<div style="text-align:center;color:#aaa;padding:40px;font-size:0.9rem">

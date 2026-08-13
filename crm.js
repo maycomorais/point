@@ -25,13 +25,8 @@ async function _crmCarregarConfig() {
     .select('cashback_percentual, cashback_validade_dias')
     .maybeSingle();
   if (data) {
-    // Se o valor for null ou undefined, usa fallback, mas se for 0, mantém 0
-    _crm_cfg.cashback_percentual   = data.cashback_percentual !== null && data.cashback_percentual !== undefined
-      ? data.cashback_percentual
-      : 10;
-    _crm_cfg.cashback_validade_dias = data.cashback_validade_dias !== null && data.cashback_validade_dias !== undefined
-      ? data.cashback_validade_dias
-      : 30;
+    _crm_cfg.cashback_percentual   = data.cashback_percentual   ?? 10;
+    _crm_cfg.cashback_validade_dias = data.cashback_validade_dias ?? 30;
   }
   // Atualiza campos de config se visíveis
   const elPct = document.getElementById('crm-cfg-pct');
@@ -111,7 +106,7 @@ function crmRenderClientes() {
 
   if (!lista.length) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">
-      ${_crm_abaAtiva === 'aniversariantes' ? '🎂 Nenhum aniversariante esta semana' : 'Nenhum cliente encontrado'}
+      ${_crm_abaAtiva === 'aniversariantes' ? t('crm.nenhum_aniversariante', '🎂 Ningún cumpleañero esta semana') : t('crm.nenhum_cliente', 'Ningún cliente encontrado')}
     </td></tr>`;
     return;
   }
@@ -119,9 +114,9 @@ function crmRenderClientes() {
   tbody.innerHTML = lista.map(c => {
     const { ehHoje, ehSemana, label } = _crmAniversario(c.data_nascimento);
     const badge = ehHoje
-      ? '<span style="background:#ff9800;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">🎂 HOJE</span>'
+      ? `<span style="background:#ff9800;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">${t('geral.hoje_excl', '¡HOY!')}</span>`
       : ehSemana
-        ? '<span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.72rem">🎁 Esta semana</span>'
+        ? `<span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.72rem">${t('geral.esta_semana', 'Esta semana')}</span>`
         : '';
 
     const saldo = c.saldo_cashback || 0;
@@ -178,7 +173,7 @@ function _crmAniversario(dataNasc) {
     if (check.getMonth() === mesDia && check.getDate() === dia) { ehSemana = true; break; }
   }
 
-  const label = nasc.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  const label = nasc.toLocaleDateString('es-PY', { day: '2-digit', month: '2-digit' });
   return { ehHoje, ehSemana, label };
 }
 
@@ -190,7 +185,7 @@ function crmRenderAniversariantes() {
     return ehHoje || ehSemana;
   });
   if (!lista.length) {
-    cont.innerHTML = '<p style="color:#aaa;font-size:0.83rem;text-align:center;padding:10px">Nenhum aniversariante esta semana 🎉</p>';
+    cont.innerHTML = `<p style="color:#aaa;font-size:0.83rem;text-align:center;padding:10px">${t('crm.nenhum_aniversariante_semana', 'Ningún cumpleañero esta semana 🎉')}</p>`;
     return;
   }
   cont.innerHTML = lista.map(c => {
@@ -200,7 +195,7 @@ function crmRenderAniversariantes() {
         <b>${ehHoje ? '🎂' : '🎁'} ${c.nome}</b>
         <div style="font-size:0.78rem;color:#888">${c.telefone || ''}</div>
       </div>
-      ${ehHoje ? '<span style="background:#ff9800;color:#fff;padding:2px 7px;border-radius:8px;font-size:0.72rem;font-weight:700">HOJE!</span>' : ''}
+      ${ehHoje ? `<span style="background:#ff9800;color:#fff;padding:2px 7px;border-radius:8px;font-size:0.72rem;font-weight:700">${t('geral.hoje_excl', '¡HOY!')}</span>` : ''}
     </div>`;
   }).join('');
 }
@@ -224,8 +219,8 @@ async function crmSalvarCliente() {
   const nasc  = document.getElementById('crm-cli-nasc').value || null;
   const saldo = parseFloat(document.getElementById('crm-cli-saldo').value) || 0;
 
-  if (!nome) { alert('Informe o nome do cliente.'); return; }
-  if (!tel)  { alert('Informe o telefone/WhatsApp.'); return; }
+  if (!nome) { alert(t('crm.alerta_nome', 'Ingrese el nombre del cliente.')); return; }
+  if (!tel)  { alert(t('crm.alerta_tel', 'Ingrese el teléfono/WhatsApp.')); return; }
 
   const payload = { nome, telefone: tel, data_nascimento: nasc, saldo_cashback: saldo };
 
@@ -233,15 +228,15 @@ async function crmSalvarCliente() {
     ? await supa.from('clientes').update(payload).eq('id', id)
     : await supa.from('clientes').insert([payload]);
 
-  if (error) { alert('Erro ao salvar: ' + error.message); return; }
+  if (error) { alert(t('crm.erro_salvar', 'Error al guardar: ') + error.message); return; }
   fecharModal('modal-crm-cliente');
   crmCarregarClientes();
 }
 
 async function crmExcluirCliente(id) {
-  if (!confirm('Excluir este cliente e todo o histórico de cashback?')) return;
+  if (!confirm(t('crm.confirm_excluir', '¿Eliminar este cliente y todo el historial de cashback?'))) return;
   const { error } = await supa.from('clientes').delete().eq('id', id);
-  if (error) { alert('Erro: ' + error.message); return; }
+  if (error) { alert(t('crm.erro_excluir', 'Error: ') + error.message); return; }
   crmCarregarClientes();
 }
 
@@ -255,18 +250,18 @@ async function crmVerHistorico(clienteId) {
     .order('created_at', { ascending: false })
     .limit(30);
 
-  const linhas = (data || []).map(t => {
-    const corTipo  = t.tipo === 'credito' ? '#1a7a2e' : '#e74c3c';
-    const sinais   = t.tipo === 'credito' ? '+' : '−';
-    const exp      = t.expira_em ? new Date(t.expira_em).toLocaleDateString('pt-BR') : '—';
-    const vencido  = t.expira_em && new Date(t.expira_em) < new Date() && !t.usado;
+  const linhas = (data || []).map(tx => {
+    const corTipo  = tx.tipo === 'credito' ? '#1a7a2e' : '#e74c3c';
+    const sinais   = tx.tipo === 'credito' ? '+' : '−';
+    const exp      = tx.expira_em ? new Date(tx.expira_em).toLocaleDateString('es-PY') : '—';
+    const vencido  = tx.expira_em && new Date(tx.expira_em) < new Date() && !tx.usado;
     return `<tr ${vencido ? 'style="opacity:0.5"' : ''}>
-      <td style="font-size:0.8rem;color:#888">${new Date(t.created_at).toLocaleDateString('pt-BR')}</td>
-      <td style="font-weight:700;color:${corTipo}">${sinais} Gs ${Math.round(t.valor).toLocaleString('es-PY')}</td>
+      <td style="font-size:0.8rem;color:#888">${new Date(tx.created_at).toLocaleDateString('es-PY')}</td>
+      <td style="font-weight:700;color:${corTipo}">${sinais} Gs ${Math.round(tx.valor).toLocaleString('es-PY')}</td>
       <td style="font-size:0.8rem;color:#555">${exp}</td>
-      <td>${t.usado ? '<span style="color:#aaa">Usado</span>' : vencido ? '<span style="color:#e74c3c">Expirado</span>' : '<span style="color:#27ae60">Ativo</span>'}</td>
+      <td>${tx.usado ? '<span style="color:#aaa">' + t('geral.usado', 'Usado') + '</span>' : vencido ? '<span style="color:#e74c3c">' + t('geral.expirado', 'Expirado') + '</span>' : '<span style="color:#27ae60">' + t('geral.ativo', 'Activo') + '</span>'}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="4" style="text-align:center;color:#aaa;padding:10px">Sem histórico</td></tr>';
+  }).join('') || `<tr><td colspan="4" style="text-align:center;color:#aaa;padding:10px">${t('crm.sem_historico', 'Sin historial')}</td></tr>`;
 
   document.getElementById('hist-cli-nome').textContent  = cliente?.nome || '';
   document.getElementById('hist-cli-saldo').textContent = `Gs ${Math.round(cliente?.saldo_cashback || 0).toLocaleString('es-PY')}`;
@@ -288,12 +283,8 @@ async function crmGerarCashback(telefone, totalPedido, pedidoId = null) {
   if (!telefone || !totalPedido) return;
 
   await _crmCarregarConfig();
-  const pct = _crm_cfg.cashback_percentual !== null && _crm_cfg.cashback_percentual !== undefined
-    ? _crm_cfg.cashback_percentual
-    : 10;
-  const valDias = _crm_cfg.cashback_validade_dias !== null && _crm_cfg.cashback_validade_dias !== undefined
-    ? _crm_cfg.cashback_validade_dias
-    : 30;
+  const pct       = _crm_cfg.cashback_percentual   || 10;
+  const valDias   = _crm_cfg.cashback_validade_dias || 30;
   const valorCash = Math.round(totalPedido * pct / 100);
   if (valorCash <= 0) return;
 
@@ -381,10 +372,69 @@ async function _crmBuscarPorTelefone(telefone) {
 let _pdvCashbackDebounce = null;
 let _pdvCashbackDisponivel = 0;
 let _pdvCashbackUsando    = false;
+let _pdvCadastroClienteDebounce = null;
 
 function pdvTelefoneInput(valor) {
   clearTimeout(_pdvCashbackDebounce);
   _pdvCashbackDebounce = setTimeout(() => buscarClientePDV(valor), 600);
+  _pdvAgendarCadastroAutomatico();
+}
+
+// Disparado também ao digitar o nome (balcao-cliente oninput="pdvNomeInput()")
+// — cobre o caso do telefone já ter sido digitado antes do nome.
+function pdvNomeInput() {
+  _pdvAgendarCadastroAutomatico();
+}
+
+function _pdvAgendarCadastroAutomatico() {
+  clearTimeout(_pdvCadastroClienteDebounce);
+  _pdvCadastroClienteDebounce = setTimeout(_pdvCadastrarClienteAuto, 900);
+}
+
+/**
+ * Cadastro automático de cliente no PDV: assim que nome + telefone (válido)
+ * estiverem preenchidos, cria (ou atualiza o nome de) o registro em `clientes`
+ * — sem precisar finalizar a venda. Silencioso: não interrompe o atendimento
+ * com alerts, só loga no console.
+ */
+async function _pdvCadastrarClienteAuto() {
+  const nomeEl = document.getElementById("balcao-cliente");
+  const telEl  = document.getElementById("balcao-telefone");
+  if (!nomeEl || !telEl) return;
+
+  const nome = nomeEl.value.trim();
+  const tel  = telEl.value.trim();
+  if (!nome || !tel) return;
+
+  const telDigits = tel.replace(/\D/g, "");
+  if (telDigits.length < 7) return; // telefone incompleto — aguarda mais dígitos
+
+  try {
+    const existente = await _crmBuscarPorTelefone(tel);
+    if (existente) {
+      // Se o cliente só existia com o nome genérico gerado pelo cashback
+      // ("Cliente PDV"), atualiza para o nome real digitado agora.
+      if (existente.nome === "Cliente PDV" && nome !== "Cliente PDV") {
+        await supa.from("clientes").update({ nome }).eq("id", existente.id);
+        existente.nome = nome;
+        if (typeof crmCarregarClientes === "function") crmCarregarClientes();
+      }
+      return;
+    }
+
+    const { error } = await supa.from("clientes").insert([{
+      nome,
+      telefone: tel,
+      saldo_cashback: 0,
+      total_gasto: 0,
+    }]);
+    if (error) { console.warn("Cadastro automático de cliente falhou:", error.message); return; }
+
+    console.log(`✅ Cliente cadastrado automaticamente: ${nome} (${tel})`);
+    if (typeof crmCarregarClientes === "function") crmCarregarClientes();
+  } catch (e) {
+    console.warn("Cadastro automático de cliente — erro:", e.message);
+  }
 }
 
 async function buscarClientePDV(tel) {
@@ -425,7 +475,7 @@ function pdvToggleCashback() {
 function _pdvAtualizarBtnCash() {
   const btn = document.getElementById('pdv-btn-usar-cash');
   if (!btn) return;
-  btn.textContent = _pdvCashbackUsando ? '✅ Cashback aplicado' : '💰 Usar Cashback';
+  btn.textContent = _pdvCashbackUsando ? t('crm.cashback_aplicado', '✅ Cashback aplicado') : t('crm.usar_cashback', '💰 Usar Cashback');
   btn.style.background = _pdvCashbackUsando ? '#27ae60' : '#ff9800';
 }
 
@@ -442,28 +492,17 @@ function pdvGetCashbackDesconto(totalAtual) {
 //  Config Cashback (salvar nas configurações)
 // ──────────────────────────────────────────────────────────────
 async function crmSalvarConfig() {
-  const pctEl = document.getElementById('crm-cfg-pct');
-  const valEl = document.getElementById('crm-cfg-val');
-
-  // Lê os valores, tratando NaN
-  const pct = pctEl ? parseFloat(pctEl.value) : 10;
-  const val = valEl ? parseInt(valEl.value) : 30;
-
-  // Se for NaN, usa fallback
-  const pctFinal = isNaN(pct) ? 10 : pct;
-  const valFinal = isNaN(val) ? 30 : val;
+  const pct = parseFloat(document.getElementById('crm-cfg-pct')?.value) || 10;
+  const val = parseInt(document.getElementById('crm-cfg-val')?.value)   || 30;
 
   const { error } = await supa.from('configuracoes')
-    .update({ cashback_percentual: pctFinal, cashback_validade_dias: valFinal })
+    .update({ cashback_percentual: pct, cashback_validade_dias: val })
     .gt('id', 0);
 
-  if (error) { alert('Erro ao salvar: ' + error.message); return; }
-
-  // Atualiza estado global
-  _crm_cfg.cashback_percentual   = pctFinal;
-  _crm_cfg.cashback_validade_dias = valFinal;
-
-  alert('✅ Configurações de cashback salvas!');
+  if (error) { alert(t('crm.erro_salvar', 'Error al guardar: ') + error.message); return; }
+  _crm_cfg.cashback_percentual   = pct;
+  _crm_cfg.cashback_validade_dias = val;
+  alert(t('crm.config_salva', '✅ ¡Configuración de cashback guardada!'));
 }
 
 // Busca de clientes (filtro)
