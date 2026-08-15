@@ -1235,11 +1235,11 @@ async function carregarPedidos(silencioso = false) {
         }
       }
 
-      // Linha da tabela (desktop)
+      // Linha da tabela (desktop) — agora usa p.id sem prefixo
       tbody.innerHTML += `
                 <tr style="${linhaCor}">
                     <td style="text-align:center; vertical-align: middle;">${checkbox}</td>
-                    <td><strong>#${p.uid_temporal || p.id}</strong></td>
+                    <td><strong>${p.id}</strong></td>
                     <td>
                         <div style="font-weight:bold">${p.cliente_nome || "Cliente"}</div>
                         <div style="font-size:0.8rem; color:#666">${p.endereco_entrega || ""}</div>
@@ -1251,7 +1251,7 @@ async function carregarPedidos(silencioso = false) {
                     <td class="actions-cell">${acoes}</td>
                 </tr>`;
 
-      // Card mobile
+      // Card mobile — agora usa p.id sem prefixo
       if (cardsDiv) {
         const statusLabel =
           p.status === "pendente"
@@ -1342,7 +1342,7 @@ async function carregarPedidos(silencioso = false) {
                     <div style="background:${cardBg}; border-radius:10px; padding:14px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); border-left:4px solid ${p.status === "pendente" ? "#f59e0b" : p.status === "pronto_entrega" ? "#22c55e" : p.status === "saiu_entrega" ? "#3498db" : "#94a3b8"};">
                         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
                             <div>
-                                <div style="font-weight:700;font-size:1rem">#${p.uid_temporal || p.id} — ${p.cliente_nome || "Cliente"}</div>
+                                <div style="font-weight:700;font-size:1rem">${p.id} — ${p.cliente_nome || "Cliente"}</div>
                                 <div style="font-size:0.78rem;color:#666;margin-top:2px">${p.endereco_entrega || (p.tipo_entrega === "balcao" ? "🏪 Balcão" : "")}</div>
                             </div>
                             <span class="status-badge st-${p.status}" style="font-size:0.7rem">${statusLabel}</span>
@@ -3119,7 +3119,7 @@ function enviarRotaZap() {
         .eq("id", p.id)
         .then();
 
-      msg += `📦 *PEDIDO #${p.uid_temporal || p.id}*\n`;
+      msg += `📦 *PEDIDO #${p.id}*\n`;
       msg += `👤 ${p.cliente_nome || "Cliente"} | 📞 ${p.cliente_telefone || ""}\n`;
 
       if (p.itens && Array.isArray(p.itens)) {
@@ -3957,25 +3957,41 @@ async function salvarProduto() {
       if (preparoOpcoes.length > 0) configFinal.preparo_opcoes = preparoOpcoes;
     }
 
-    // Variações de sabor (tipo variacoes puro)
+    // Variações de sabor (tipo variacoes puro) — com estoque individual
+    // opcional. Interface simples (um campo de quantidade na própria linha),
+    // mas por baixo cada variação é sincronizada com sua própria linha em
+    // `inventario` (permite relatórios/movimentações como o resto do
+    // sistema) via _sincronizarEstoqueVariacao().
     if (tipo === "variacoes") {
+      const estoquePorVariacao = document.getElementById("variacoes-estoque-ativo")?.checked || false;
       const variacoes = [];
-      document
-        .querySelectorAll("#variacoes-lista .variacao-row")
-        .forEach((row) => {
-          const nome = row.querySelector('[data-f="vnome"]').value.trim();
-          const preco =
-            parseFloat(row.querySelector('[data-f="vpreco"]').value) || 0;
-          const img = row.querySelector('[data-f="vimg"]').value.trim() || "";
-          const ativoEl = row.querySelector('[data-f="vativo"]');
-          const ativo = ativoEl ? ativoEl.checked : true;
-          const inventarioIdEl = row.querySelector('[data-f="vinventario"]');
-          const inventario_id = inventarioIdEl?.value
-            ? parseInt(inventarioIdEl.value)
-            : null;
-          if (nome) variacoes.push({ nome, preco, img, ativo, inventario_id });
-        });
+      const rowsVar = [...document.querySelectorAll("#variacoes-lista .variacao-row")];
+      for (const row of rowsVar) {
+        const nome = row.querySelector('[data-f="vnome"]').value.trim();
+        const preco = parseFloat(row.querySelector('[data-f="vpreco"]').value) || 0;
+        const img = row.querySelector('[data-f="vimg"]').value.trim() || "";
+        const ativoEl = row.querySelector('[data-f="vativo"]');
+        const ativo = ativoEl ? ativoEl.checked : true;
+        if (!nome) continue;
+
+        let inventario_id = row.dataset.inventarioId ? parseInt(row.dataset.inventarioId) : null;
+
+        if (estoquePorVariacao) {
+          const estoqueInput = row.querySelector('[data-f="vestoque"]');
+          const minInput = row.querySelector('[data-f="vestoque_min"]');
+          const novaQtd = estoqueInput?.value !== "" ? parseInt(estoqueInput.value) || 0 : 0;
+          const novoMin = minInput?.value !== "" ? parseInt(minInput.value) || 0 : 0;
+          try {
+            inventario_id = await _sincronizarEstoqueVariacao(inventario_id, nome, novaQtd, novoMin);
+          } catch (e) {
+            console.warn(`Falha ao sincronizar estoque da variação "${nome}":`, e.message);
+          }
+        }
+
+        variacoes.push({ nome, preco, img, ativo, inventario_id });
+      }
       configFinal.variacoes = variacoes;
+      configFinal.estoque_por_variacao = estoquePorVariacao;
     }
 
     // Kg: apenas preco_kg, sem prod-preco
@@ -4012,9 +4028,27 @@ async function salvarProduto() {
 
     const temEstoque =
       document.getElementById("prod-tem-estoque")?.checked || false;
-    const inventarioId = temEstoque
-      ? parseInt(document.getElementById("prod-inventario-id")?.value) || null
-      : null;
+    let inventarioId = null;
+    if (temEstoque) {
+      const selEstoqueVal = document.getElementById("prod-inventario-id")?.value;
+      if (selEstoqueVal) {
+        // Vinculando a um item de inventário já existente (fluxo antigo).
+        inventarioId = parseInt(selEstoqueVal) || null;
+      } else {
+        // Nenhum item existente selecionado: cria um item novo em
+        // `inventario` automaticamente com o nome do produto e a
+        // quantidade informada — sem precisar passar pela aba Estoque.
+        const qtdNova = parseInt(document.getElementById("prod-estoque-qtd-nova")?.value) || 0;
+        const minNova = parseInt(document.getElementById("prod-estoque-min-nova")?.value) || 0;
+        const nomeProdutoAtual = document.getElementById("prod-nome").value.trim() || "Produto sem nome";
+        try {
+          inventarioId = await _criarNovoItemInventario(nomeProdutoAtual, qtdNova, minNova);
+        } catch (e) {
+          console.warn("Falha ao criar item de estoque automático:", e.message);
+          alert("⚠️ Não foi possível criar o item de estoque automaticamente: " + e.message + "\nO produto será salvo sem controle de estoque vinculado.");
+        }
+      }
+    }
     const dados = {
       nome: document.getElementById("prod-nome").value,
       descricao: document.getElementById("prod-desc").value,
@@ -4143,6 +4177,13 @@ async function abrirModalProduto(produto = null, tipoInicial = null) {
   const _ea = document.getElementById("estoque-area");
   if (_te) _te.checked = false;
   if (_ea) _ea.style.display = "none";
+  const _qtdNova = document.getElementById("prod-estoque-qtd-nova");
+  const _minNova = document.getElementById("prod-estoque-min-nova");
+  if (_qtdNova) _qtdNova.value = "";
+  if (_minNova) _minNova.value = "";
+  const _veEstoque = document.getElementById("variacoes-estoque-ativo");
+  if (_veEstoque) _veEstoque.checked = false;
+  document.getElementById("variacoes-lista").innerHTML = "";
   document.getElementById("extras-lista").innerHTML = "";
   document.getElementById("shake-tamanhos-lista") &&
     (document.getElementById("shake-tamanhos-lista").innerHTML = "");
@@ -4313,8 +4354,10 @@ async function abrirModalProduto(produto = null, tipoInicial = null) {
       if (tipo === "combo_fechado") {
         cfCarregarNoBuilder(cfg);
       }
-      // Variações de sabor
+      // Variações de sabor (+ restaura estado do estoque por variação)
       if (tipo === "variacoes" && cfg.variacoes) {
+        const cbEstoqueVar = document.getElementById("variacoes-estoque-ativo");
+        if (cbEstoqueVar) cbEstoqueVar.checked = cfg.estoque_por_variacao === true;
         document.getElementById("variacoes-lista").innerHTML = "";
         cfg.variacoes.forEach((v) => addVariacao(v));
       }
@@ -4503,7 +4546,12 @@ function addVariacao(dados = {}) {
   const row = document.createElement("div");
   row.className = "variacao-row";
   const pausado = dados.ativo === false;
+  // inventario_id fica guardado no dataset da linha (não é editável pelo
+  // usuário) — é criado/atualizado silenciosamente ao salvar o produto.
+  row.dataset.inventarioId = dados.inventario_id || "";
   row.style.cssText = `background:${pausado ? "#fff5f5" : "#fff"};border:1px solid ${pausado ? "#fca5a5" : "#e9d5ff"};border-radius:10px;padding:12px;display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;opacity:${pausado ? "0.7" : "1"}`;
+
+  const estoqueAtivo = document.getElementById("variacoes-estoque-ativo")?.checked || false;
   row.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:6px">
       <input data-f="vnome" class="form-control" value="${dados.nome || ""}" placeholder="Nome da variação (ex: Ex: Variação Premium)" style="font-weight:600">
@@ -4512,11 +4560,16 @@ function addVariacao(dados = {}) {
         <input data-f="vpreco" type="number" class="form-control" value="${dados.preco || ""}" placeholder="Preço" style="max-width:140px">
       </div>
       <input data-f="vimg" class="form-control" value="${dados.img || ""}" placeholder="URL da foto (opcional — usa foto do produto por padrão)" style="font-size:0.8rem;color:#888">
-      <div style="display:flex;gap:8px;align-items:center">
-        <select data-f="vinventario" class="form-control variacao-inventario-select" style="font-size:0.8rem;max-width:220px" onchange="_atualizarBadgeEstoqueVariacao(this)">
-          <option value="">— Sem controle de estoque —</option>
-        </select>
-        <span class="variacao-estoque-badge" style="font-size:0.75rem;color:#888;white-space:nowrap"></span>
+      <div class="variacao-estoque-input" style="display:${estoqueAtivo ? "flex" : "none"};gap:8px;align-items:center;margin-top:4px;">
+        <div style="flex:1;">
+          <label style="font-size:0.7rem;color:#555;font-weight:600;">Estoque</label>
+          <input data-f="vestoque" type="number" class="form-control" placeholder="Qtd" min="0" step="1" style="max-width:100px;">
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:0.7rem;color:#555;font-weight:600;">Mínimo</label>
+          <input data-f="vestoque_min" type="number" class="form-control" placeholder="Alerta" min="0" step="1" style="max-width:80px;">
+        </div>
+        <span class="variacao-estoque-badge" style="font-size:0.7rem;color:#888;align-self:end;padding-bottom:9px"></span>
       </div>
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.82rem;color:${pausado ? "#c0392b" : "#16a34a"}">
         <input data-f="vativo" type="checkbox" ${!pausado ? "checked" : ""} onchange="this.closest('.variacao-row').style.background=this.checked?'#fff':'#fff5f5';this.closest('.variacao-row').style.opacity=this.checked?'1':'0.7';this.closest('.variacao-row').style.borderColor=this.checked?'#e9d5ff':'#fca5a5';this.parentElement.style.color=this.checked?'#16a34a':'#c0392b';this.parentElement.lastChild.textContent=this.checked?' Disponível':' Pausado'">
@@ -4529,47 +4582,33 @@ function addVariacao(dados = {}) {
     <button class="btn btn-sm btn-danger" onclick="this.closest('.variacao-row').remove()" title="Remover" style="align-self:start">✕</button>
   `;
   lista.appendChild(row);
-  const _selVinv = row.querySelector('[data-f="vinventario"]');
-  _carregarSelectVariacaoInventario(_selVinv, dados.inventario_id || null);
+
+  // Se já existe um inventario_id vinculado (produto em edição), busca o
+  // valor REAL e atual em `inventario` — nunca confia num número cacheado
+  // dentro do montagem_config, que pode estar desatualizado.
+  if (dados.inventario_id) {
+    _carregarEstoqueRealVariacao(row, dados.inventario_id);
+  }
 }
 
-// Preenche o <select> de estoque de UMA linha de variação com os itens do inventário.
-// Reaproveita o mesmo padrão usado em _carregarSelectInventario, mas aceita
-// qualquer elemento <select> (necessário pois existem N linhas de variação).
-async function _carregarSelectVariacaoInventario(selectEl, selectedId = null) {
-  if (!selectEl) return;
+// Busca a quantidade/mínimo atuais em `inventario` e preenche os campos da
+// linha — garante que o número mostrado reflete o banco, não um valor
+// congelado dentro do JSON de configuração do produto.
+async function _carregarEstoqueRealVariacao(row, inventarioId) {
   const { data, error } = await supa
     .from("inventario")
-    .select("id, nome, quantidade, unidade")
-    .order("nome");
-  if (error) {
-    console.warn("Erro ao carregar inventário para variação:", error.message);
+    .select("quantidade, quantidade_minima")
+    .eq("id", inventarioId)
+    .single();
+  if (error || !data) {
+    row.querySelector(".variacao-estoque-badge").textContent = "⚠️ vínculo de estoque não encontrado";
     return;
   }
-  selectEl.innerHTML = '<option value="">— Sem controle de estoque —</option>';
-  (data || []).forEach((i) => {
-    const opt = document.createElement("option");
-    opt.value = i.id;
-    opt.textContent = `${i.nome} (${i.quantidade ?? 0} ${i.unidade || "un"})`;
-    if (selectedId && i.id == selectedId) opt.selected = true;
-    selectEl.appendChild(opt);
-  });
-  _atualizarBadgeEstoqueVariacao(selectEl);
-}
-
-// Atualiza o texto "(X un em estoque)" ao lado do select da variação
-function _atualizarBadgeEstoqueVariacao(selectEl) {
-  const badge = selectEl
-    ?.closest(".variacao-row")
-    ?.querySelector(".variacao-estoque-badge");
-  if (!badge) return;
-  const opt = selectEl.options[selectEl.selectedIndex];
-  if (!opt || !opt.value) {
-    badge.textContent = "";
-    return;
-  }
-  const match = opt.textContent.match(/\(([^)]+)\)$/);
-  badge.textContent = match ? match[1] : "";
+  const inpEstoque = row.querySelector('[data-f="vestoque"]');
+  const inpMin = row.querySelector('[data-f="vestoque_min"]');
+  if (inpEstoque) inpEstoque.value = data.quantidade ?? "";
+  if (inpMin) inpMin.value = data.quantidade_minima ?? "";
+  row.querySelector(".variacao-estoque-badge").textContent = `atual: ${data.quantidade ?? 0}`;
 }
 
 // ─── PIZZA BUILDER (tipos dinâmicos) ───────────────────────────
@@ -7858,6 +7897,80 @@ let _taxaDebitoPDV = 1.99;
 let _taxaCreditoPDV = 4.98;
 let _cartaoBRTipoPDV = "debito";
 
+// Mapa global: inventario_id -> { quantidade, quantidade_minima }.
+// Alimenta os badges de estoque baixo nos cards do PDV (_criarCardPDV).
+let _pdvEstoqueMap = {};
+
+async function _carregarMapaEstoquePDV() {
+  const ids = new Set();
+  (produtosCachePDV || []).forEach((p) => {
+    if (p.inventario_id) ids.add(p.inventario_id);
+    const cfg = p.montagem_config;
+    if (cfg && cfg.__tipo === "variacoes" && Array.isArray(cfg.variacoes)) {
+      cfg.variacoes.forEach((v) => { if (v.inventario_id) ids.add(v.inventario_id); });
+    }
+  });
+  _pdvEstoqueMap = {};
+  if (!ids.size) return;
+  const { data, error } = await supa
+    .from("inventario")
+    .select("id, quantidade, quantidade_minima")
+    .in("id", [...ids]);
+  if (error || !data) return;
+  data.forEach((i) => {
+    _pdvEstoqueMap[i.id] = { quantidade: i.quantidade ?? 0, quantidade_minima: i.quantidade_minima ?? 0 };
+  });
+}
+
+// Calcula o status de estoque de um produto pro badge do card do PDV.
+// Para multivariação, usa a PIOR variação (menor estoque relativo ao seu
+// próprio mínimo) — se uma variação está crítica, o produto inteiro merece
+// o alerta. Retorna null quando não há controle de estoque configurado ou
+// quando o nível está saudável (não passa pelo limiar de "baixo").
+function _statusEstoquePDV(p) {
+  const cfg = p.montagem_config;
+  const candidatos = [];
+
+  if (p.inventario_id && _pdvEstoqueMap[p.inventario_id]) {
+    candidatos.push(_pdvEstoqueMap[p.inventario_id]);
+  }
+  if (cfg && cfg.__tipo === "variacoes" && Array.isArray(cfg.variacoes)) {
+    cfg.variacoes.forEach((v) => {
+      if (v.inventario_id && _pdvEstoqueMap[v.inventario_id]) {
+        candidatos.push(_pdvEstoqueMap[v.inventario_id]);
+      }
+    });
+  }
+  if (!candidatos.length) return null;
+
+  // Pior caso: menor "folga" em relação ao próprio mínimo (ou, sem mínimo
+  // definido, o menor valor absoluto).
+  let pior = null;
+  let piorFolga = Infinity;
+  candidatos.forEach((c) => {
+    const folga = c.quantidade_minima > 0 ? c.quantidade - c.quantidade_minima : c.quantidade - 5;
+    if (folga < piorFolga) { piorFolga = folga; pior = c; }
+  });
+
+  const { quantidade, quantidade_minima } = pior;
+  const limiteCritico = quantidade_minima > 0 ? quantidade_minima : 0;
+  const limiteAtencao = quantidade_minima > 0 ? quantidade_minima * 2 : 5;
+
+  if (quantidade <= limiteCritico) return { nivel: "critico", quantidade, minimo: quantidade_minima };
+  if (quantidade <= limiteAtencao) return { nivel: "atencao", quantidade, minimo: quantidade_minima };
+  return null; // estoque saudável — sem badge, evita poluir a grade
+}
+
+// Recarrega o mapa de estoque e re-renderiza a grade do PDV — chamado após
+// qualquer venda que desconte estoque, pra badge não ficar desatualizado
+// durante a mesma sessão. Só re-renderiza se a aba PDV estiver realmente
+// visível (evita trabalho à toa em outras telas).
+async function _atualizarBadgesEstoquePDV() {
+  if (!document.getElementById("pdv")?.offsetParent) return;
+  await _carregarMapaEstoquePDV();
+  if (typeof renderizarGridPDV === "function") renderizarGridPDV();
+}
+
 async function carregarPDV() {
   // PDV carrega TODOS os produtos ativos (inclui pausado=null e pausado=false)
   // .neq("pausado", true) exclui NULLs no PostgREST — usar .or() para incluir
@@ -7869,6 +7982,10 @@ async function carregarPDV() {
     .order("categoria_slug")
     .order("nome");
   produtosCachePDV = (data || []).map(_normalizarMontagemConfig);
+
+  // Carrega o mapa de estoque (produto direto + variações) usado pros
+  // badges de estoque baixo nos cards do PDV.
+  await _carregarMapaEstoquePDV();
 
   // Carrega categorias para exibir no PDV
   const { data: cats } = await supa
@@ -8110,6 +8227,29 @@ function _criarCardPDV(p) {
   const isKg = cfg && !Array.isArray(cfg) && cfg.__tipo === "kg";
   const precoKg = isKg ? cfg.preco_kg || p.preco || 0 : 0;
 
+  // Detectar se tem variações
+  let temVariacoes = false;
+  if (cfg && !Array.isArray(cfg)) {
+    const tipo = cfg.__tipo;
+    if (tipo === "variacoes" && cfg.variacoes && cfg.variacoes.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "pizza" && cfg.sabores && cfg.sabores.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "acai" && cfg.tamanhos && cfg.tamanhos.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "shake" && cfg.shake && cfg.shake.sabores && cfg.shake.sabores.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "suco" && cfg.etapas && cfg.etapas.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "sorvete" && cfg.sabores && cfg.sabores.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "montavel" && cfg.etapas && cfg.etapas.length > 0) {
+      temVariacoes = true;
+    } else if (tipo === "combo_fechado" && cfg.sabores && cfg.sabores.length > 0) {
+      temVariacoes = true;
+    }
+  }
+
   const card = document.createElement("div");
   card.className = "pdv-card" + (isKg ? " pdv-card-kg" : "");
   card.title = p.nome;
@@ -8124,11 +8264,31 @@ function _criarCardPDV(p) {
     : `Gs ${p.preco.toLocaleString("es-PY")}`;
 
   const badge = isKg ? `<span class="pdv-card-kg-badge">⚖️ Kg</span>` : "";
+  const varBadge = temVariacoes ? `<span class="pdv-card-var-badge" style="font-size:0.6rem;background:#e9d5ff;color:#7c3aed;border-radius:3px;padding:0 4px;margin-left:4px;font-weight:700;">🎨</span>` : "";
+
+  // Badge de estoque baixo — só aparece quando o nível realmente pede
+  // atenção (crítico ou em alerta); estoque saudável não polui a grade.
+  const estoqueStatus = _statusEstoquePDV(p);
+  let estoqueBadgeHtml = "";
+  if (estoqueStatus) {
+    const isCritico = estoqueStatus.nivel === "critico";
+    const cor = isCritico ? "#dc2626" : "#f59e0b";
+    const corBg = isCritico ? "#fee2e2" : "#fef3c7";
+    const titulo = isCritico
+      ? `Estoque crítico: ${estoqueStatus.quantidade} restante(s)${estoqueStatus.minimo ? ` (mínimo: ${estoqueStatus.minimo})` : ""}`
+      : `Estoque baixo: ${estoqueStatus.quantidade} restante(s)${estoqueStatus.minimo ? ` (mínimo: ${estoqueStatus.minimo})` : ""}`;
+    card.classList.add("pdv-card-estoque-" + estoqueStatus.nivel);
+    estoqueBadgeHtml = `
+      <div class="pdv-card-estoque-badge" style="background:${cor};box-shadow:0 0 0 2px ${corBg}" title="${titulo}">
+        ${isCritico ? "⚠️" : ""}${estoqueStatus.quantidade}
+      </div>`;
+  }
 
   card.innerHTML = `
+    ${estoqueBadgeHtml}
     ${imgHtml}
     <div class="pdv-card-body">
-      <div class="pdv-card-name">${p.nome} ${badge}</div>
+      <div class="pdv-card-name">${p.nome} ${badge}${varBadge}</div>
       <div class="pdv-card-price">${priceStr}</div>
     </div>`;
   return card;
@@ -10444,7 +10604,10 @@ async function salvarPedidoBalcao() {
   const totalNovo = subtotalLiquido + fretePDV;
   const _agora = new Date().toISOString();
   const pedido = {
-    uid_temporal: `BALC-${Math.floor(Math.random() * 1000)}`,
+    // uid_temporal removido: pedidos de balcão passam a exibir o ID
+    // numérico real (p.id), igual ao que já acontece com delivery — antes
+    // gerava um código aleatório "BALC-0..999" (podia até colidir entre
+    // pedidos diferentes, já que era só Math.random()).
     status: _soKg
       ? "entregue"
       : _todosSemCozinha(carrinhoPDV)
@@ -10685,44 +10848,74 @@ function _pdvToast(msg, duracao = 3000) {
 
 // ── Barra de Mesas Ativas no PDV ─────────────────────────────
 async function atualizarBarraMesasAtivas() {
-  const bar = document.getElementById("pdv-mesas-bar");
-  const vazio = document.getElementById("pdv-mesas-vazio");
+  const bar = document.getElementById('pdv-mesas-bar');
+  const vazio = document.getElementById('pdv-mesas-vazio');
   if (!bar) return;
 
-  const { data } = await supa
-    .from("pedidos")
-    .select("id, endereco_entrega, cliente_nome, total_geral, status, itens")
-    .eq("tipo_entrega", "balcao")
-    .neq("status", "entregue")
-    .neq("status", "cancelado")
-    .order("id", { ascending: true });
+  // Cria ou mantém o botão toggle e o container da lista
+  let toggleBtn = bar.querySelector('.pdv-mesas-toggle');
+  if (!toggleBtn) {
+    toggleBtn = document.createElement('button');
+    toggleBtn.className = 'pdv-mesas-toggle';
+    toggleBtn.textContent = '▼';
+    toggleBtn.title = 'Ocultar mesas';
+    toggleBtn.onclick = toggleMesasBar;
+    bar.prepend(toggleBtn);
+  }
 
-  // Limpar chips anteriores (manter apenas label e span vazio)
-  bar.querySelectorAll(".mesa-chip").forEach((c) => c.remove());
-  if (vazio) vazio.style.display = data && data.length > 0 ? "none" : "inline";
+  let list = document.getElementById('pdv-mesas-list');
+  if (!list) {
+    list = document.createElement('span');
+    list.id = 'pdv-mesas-list';
+    list.style.display = 'flex';
+    list.style.flexWrap = 'wrap';
+    list.style.gap = '6px';
+    list.style.alignItems = 'center';
+    const label = bar.querySelector('.pdv-mesas-label');
+    if (label) {
+      bar.insertBefore(list, label.nextSibling);
+    } else {
+      bar.appendChild(list);
+    }
+  }
+
+  // Limpa apenas os chips, mantendo o vazio se existir
+  list.querySelectorAll('.mesa-chip').forEach(c => c.remove());
+
+  // Busca pedidos
+  const { data } = await supa
+    .from('pedidos')
+    .select('id, endereco_entrega, cliente_nome, total_geral, status, itens')
+    .eq('tipo_entrega', 'balcao')
+    .neq('status', 'entregue')
+    .neq('status', 'cancelado')
+    .order('id', { ascending: true });
+
+  // Atualiza vazio
+  if (vazio) vazio.style.display = data && data.length > 0 ? 'none' : 'inline';
 
   if (!data || data.length === 0) return;
 
   data.forEach((p) => {
-    const nrMesa = (p.endereco_entrega || "").replace("Mesa ", "") || p.id;
-    const chip = document.createElement("button");
+    const nrMesa = (p.endereco_entrega || '').replace('Mesa ', '') || p.id;
+    const chip = document.createElement('button');
     chip.className =
-      "mesa-chip" +
-      (p.status === "pronto_entrega"
-        ? " mesa-pronto"
-        : p.status === "em_preparo"
-          ? " mesa-em-preparo"
-          : "");
-    chip.title = `${p.cliente_nome || "Mesa " + nrMesa} — Gs ${(p.total_geral || 0).toLocaleString("es-PY")} — Clique para adicionar itens`;
+      'mesa-chip' +
+      (p.status === 'pronto_entrega'
+        ? ' mesa-pronto'
+        : p.status === 'em_preparo'
+          ? ' mesa-em-preparo'
+          : '');
+    chip.title = `${p.cliente_nome || 'Mesa ' + nrMesa} — Gs ${(p.total_geral || 0).toLocaleString('es-PY')} — Clique para adicionar itens`;
     chip.innerHTML = `<span class="mesa-chip-num">${nrMesa}</span><span class="mesa-chip-status">${
-      p.status === "pronto_entrega"
-        ? "✓ Pronto"
-        : p.status === "em_preparo"
-          ? "🔥"
-          : "●"
+      p.status === 'pronto_entrega'
+        ? '✓ Pronto'
+        : p.status === 'em_preparo'
+          ? '🔥'
+          : '●'
     }</span>`;
     chip.onclick = () => abrirMesaExistente(p);
-    bar.appendChild(chip);
+    list.appendChild(chip);
   });
 }
 
@@ -11467,7 +11660,7 @@ async function deletarCupom(id) {
 async function avisarClientePronto(pedidoId) {
   const { data: p } = await supa
     .from("pedidos")
-    .select("cliente_nome, cliente_telefone, uid_temporal")
+    .select("cliente_nome, cliente_telefone, id") // não usa uid_temporal
     .eq("id", pedidoId)
     .single();
   if (!p) {
@@ -11484,7 +11677,7 @@ async function avisarClientePronto(pedidoId) {
   // Carrega nome da loja
   const nomeRestaurante = NOME_RESTAURANTE || "Restaurante";
   const nomeCliente = p.cliente_nome || "Cliente";
-  const numPedido = p.uid_temporal || pedidoId;
+  const numPedido = p.id;
 
   // Mensagem em 3 idiomas
   const msgs = {
@@ -11895,6 +12088,7 @@ async function _descontarEstoqueVendaItens(itens) {
         .catch(() => {});
     }
     console.log(`✅ Estoque descontado: ${estoques.length} item(s)`);
+    _atualizarBadgesEstoquePDV();
   } catch (e) {
     console.warn("Estoque desconto (itens):", e.message);
   }
@@ -11974,8 +12168,20 @@ async function _descontarEstoqueVenda(pedidoId, itensDireto) {
     console.log(
       `✅ Estoque descontado: pedido ${pedidoId || "(PDV)"}, ${estoques.length} item(s)`,
     );
+    _atualizarBadgesEstoquePDV();
   } catch (e) {
     console.warn("Estoque desconto:", e.message);
+  }
+}
+
+function toggleMesasBar() {
+  const list = document.getElementById('pdv-mesas-list');
+  const btn = document.querySelector('.pdv-mesas-toggle');
+  if (!list) return;
+  list.classList.toggle('collapsed');
+  if (btn) {
+    btn.textContent = list.classList.contains('collapsed') ? '▶' : '▼';
+    btn.title = list.classList.contains('collapsed') ? 'Mostrar mesas' : 'Ocultar mesas';
   }
 }
 
@@ -12394,6 +12600,97 @@ async function _carregarSelectInventario(selectedId = null) {
       sel.appendChild(opt);
     });
   }
+  _toggleCriarNovoEstoque();
+}
+
+// Mostra/oculta os campos de "criar item novo" (quantidade/mínimo) conforme
+// o select de estoque do produto: se um item existente foi escolhido, não
+// faz sentido também criar um novo — só um dos dois caminhos é usado.
+function _toggleCriarNovoEstoque() {
+  const sel = document.getElementById("prod-inventario-id");
+  const area = document.getElementById("prod-estoque-novo-area");
+  if (!sel || !area) return;
+  area.style.display = sel.value ? "none" : "block";
+}
+
+// Cria um novo item em `inventario` (linkado a um produto simples, não a
+// uma variação) e registra o estoque inicial em inventario_movimentos —
+// mesma convenção usada em _sincronizarEstoqueVariacao. Permite criar o
+// estoque direto do modal de produto, sem precisar ir na aba Estoque antes;
+// o item criado aparece lá normalmente (mesma tabela, mesma lógica).
+async function _criarNovoItemInventario(nome, quantidade, minimo) {
+  const { data, error } = await supa
+    .from("inventario")
+    .insert([{ nome, unidade: "un", quantidade, quantidade_minima: minimo }])
+    .select("id")
+    .single();
+  if (error) throw error;
+  if (quantidade > 0) {
+    const emailAtual = document.getElementById("user-email")?.innerText || "sistema";
+    await supa.from("inventario_movimentos").insert([{
+      inventario_id: data.id, tipo: "add", quantidade,
+      motivo: `Estoque inicial (criado junto com o produto "${nome}")`,
+      usuario_email: emailAtual,
+    }]);
+  }
+  return data.id;
+}
+
+// Cria (1ª vez) ou atualiza a linha de `inventario` vinculada a uma
+// variação, e registra a movimentação (add/sub) quando a quantidade muda —
+// mantém a interface do produto simples (um campo numérico na linha) mas
+// preserva histórico/relatórios via inventario_movimentos, seguindo a
+// mesma convenção do resto do sistema (tipo indica direção, quantidade
+// sempre positiva — ver _descontarEstoqueVendaItens).
+async function _sincronizarEstoqueVariacao(inventarioId, nomeVariacao, novaQtd, novoMin) {
+  const emailAtual = document.getElementById("user-email")?.innerText || "sistema";
+
+  if (!inventarioId) {
+    const { data, error } = await supa
+      .from("inventario")
+      .insert([{
+        nome: `Variação: ${nomeVariacao}`,
+        unidade: "un",
+        quantidade: novaQtd,
+        quantidade_minima: novoMin,
+      }])
+      .select("id")
+      .single();
+    if (error) throw error;
+    if (novaQtd > 0) {
+      await supa.from("inventario_movimentos").insert([{
+        inventario_id: data.id, tipo: "add", quantidade: novaQtd,
+        motivo: `Estoque inicial (cadastro da variação "${nomeVariacao}")`,
+        usuario_email: emailAtual,
+      }]);
+    }
+    return data.id;
+  }
+
+  const { data: atual, error: errAtual } = await supa
+    .from("inventario")
+    .select("quantidade")
+    .eq("id", inventarioId)
+    .single();
+  if (errAtual) throw errAtual;
+
+  const delta = novaQtd - (atual?.quantidade ?? 0);
+  const { error: errUpd } = await supa
+    .from("inventario")
+    .update({ quantidade: novaQtd, quantidade_minima: novoMin })
+    .eq("id", inventarioId);
+  if (errUpd) throw errUpd;
+
+  if (delta !== 0) {
+    await supa.from("inventario_movimentos").insert([{
+      inventario_id: inventarioId,
+      tipo: delta > 0 ? "add" : "sub",
+      quantidade: Math.abs(delta),
+      motivo: `Ajuste manual via produto (variação "${nomeVariacao}")`,
+      usuario_email: emailAtual,
+    }]);
+  }
+  return inventarioId;
 }
 
 function toggleEstoqueProduto() {
@@ -12404,21 +12701,17 @@ function toggleEstoqueProduto() {
   if (checked) _carregarSelectInventario();
 }
 
-// Toggle "Ativar estoque por variação" — liga/desliga o controle de estoque
-// individual de cada linha de variação (select + badge que já ficam sempre
-// no DOM, adicionados por addVariacao()). Usa event.target (mesmo padrão já
-// usado em salvarProduto()) para não depender de um id fixo de checkbox.
+// Toggle "Ativar estoque por variação" — liga/desliga os campos de
+// quantidade/mínimo de cada linha de variação (addVariacao() já cria os
+// dois campos sempre, só escondidos). Lê pelo id do checkbox (não por
+// event.target) para poder ser chamada também programaticamente ao
+// carregar um produto pra edição, sem precisar de um evento de clique real.
 function toggleVariacoesEstoque() {
-  const checked = !!event?.target?.checked;
+  const checked = document.getElementById("variacoes-estoque-ativo")?.checked || false;
   document
-    .querySelectorAll("#variacoes-lista .variacao-row select[data-f='vinventario']")
-    .forEach((sel) => {
-      const wrapper = sel.closest("div");
-      if (wrapper) wrapper.style.display = checked ? "flex" : "none";
-      if (!checked) {
-        sel.value = "";
-        _atualizarBadgeEstoqueVariacao(sel);
-      }
+    .querySelectorAll("#variacoes-lista .variacao-row .variacao-estoque-input")
+    .forEach((wrapper) => {
+      wrapper.style.display = checked ? "flex" : "none";
     });
 }
 // =========================================

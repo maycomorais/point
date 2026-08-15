@@ -2704,7 +2704,20 @@
             </div>
           </div>
           <div id="estoque-area" style="display:none">
-            <select id="prod-inventario-id" class="form-control"><option value="" data-i18n="estoque.selecione_item">— Selecione o item —</option></select>
+            <select id="prod-inventario-id" class="form-control" onchange="_toggleCriarNovoEstoque()"><option value="" data-i18n="estoque.selecione_item">— Selecione o item —</option></select>
+            <div id="prod-estoque-novo-area" style="margin-top:8px">
+              <div style="font-size:0.76rem;color:#16a34a;margin-bottom:6px">✨ Deixe "— Selecione o item —" acima e preencha abaixo pra criar um item novo automaticamente (ele também aparece na aba Estoque).</div>
+              <div style="display:flex;gap:8px">
+                <div style="flex:1">
+                  <label style="font-size:0.7rem;color:#555;font-weight:600">Quantidade inicial</label>
+                  <input type="number" id="prod-estoque-qtd-nova" class="form-control" min="0" step="1" placeholder="Qtd">
+                </div>
+                <div style="flex:1">
+                  <label style="font-size:0.7rem;color:#555;font-weight:600">Mínimo (alerta)</label>
+                  <input type="number" id="prod-estoque-min-nova" class="form-control" min="0" step="1" placeholder="Mínimo">
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

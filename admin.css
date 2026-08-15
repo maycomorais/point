@@ -727,9 +727,33 @@ select.form-control, select.input-modern {
     user-select: none;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
     min-height: 58px;
+    position: relative;
 }
 .pdv-card:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: 0 8px 12px -2px rgba(0, 0, 0, 0.1); }
 .pdv-card:active { transform: translateY(0); opacity: 0.9; }
+
+.pdv-card-estoque-badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 999px;
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    line-height: 1;
+}
+.pdv-card-estoque-critico { border-color: #fca5a5; }
+.pdv-card-estoque-critico:hover { border-color: #dc2626; }
+.pdv-card-estoque-atencao { border-color: #fde68a; }
+.pdv-card-estoque-atencao:hover { border-color: #f59e0b; }
 
 .pdv-card-img {
     width: 100%; min-width: 100px;
