@@ -3469,6 +3469,7 @@ async function carregarProdutos() {
   _todosProdutos = (data || []).map(_normalizarMontagemConfig);
   _produtosMap = {};
   _todosProdutos.forEach(p => { _produtosMap[p.id] = p; });
+  await _carregarMapaEstoque(_todosProdutos); // badges de estoque baixo nos cards
   renderizarCardsProdutos(_todosProdutos);
   // Só recarrega o select de categorias se o modal de produto estiver fechado
   const modalAberto =
@@ -3556,11 +3557,29 @@ function renderizarCardsProdutos(lista) {
 
     // produto referenciado pelo id via _produtosMap (sem JSON inline no onclick)
 
+    // Badge de estoque baixo — mesma lógica/limiares do PDV (_statusEstoque),
+    // canto superior direito da imagem (badges de tipo/pausado ficam à esquerda).
+    const estoqueStatus = _statusEstoque(p);
+    let estoqueBadgeHtml = "";
+    if (estoqueStatus) {
+      const isCritico = estoqueStatus.nivel === "critico";
+      const cor = isCritico ? "#dc2626" : "#f59e0b";
+      const corBg = isCritico ? "#fee2e2" : "#fef3c7";
+      const titulo = isCritico
+        ? `Estoque crítico: ${estoqueStatus.quantidade} restante(s)${estoqueStatus.minimo ? ` (mínimo: ${estoqueStatus.minimo})` : ""}`
+        : `Estoque baixo: ${estoqueStatus.quantidade} restante(s)${estoqueStatus.minimo ? ` (mínimo: ${estoqueStatus.minimo})` : ""}`;
+      estoqueBadgeHtml = `
+        <div class="pdv-card-estoque-badge" style="background:${cor};box-shadow:0 0 0 2px ${corBg}" title="${titulo}">
+          ${isCritico ? "⚠️" : ""}${estoqueStatus.quantidade}
+        </div>`;
+    }
+
     const card = document.createElement("div");
     card.className = `produto-card${!p.ativo ? " pausado" : ""}`;
     card.innerHTML = `
       <div class="produto-card-img-wrap">
         ${imgHtml}
+        ${estoqueBadgeHtml}
         <div class="produto-card-badges">
           <span class="badge-tipo">${tipoIcon} ${tipoName}</span>
           ${badgePausado}
@@ -7898,19 +7917,20 @@ let _taxaCreditoPDV = 4.98;
 let _cartaoBRTipoPDV = "debito";
 
 // Mapa global: inventario_id -> { quantidade, quantidade_minima }.
-// Alimenta os badges de estoque baixo nos cards do PDV (_criarCardPDV).
-let _pdvEstoqueMap = {};
+// Alimenta os badges de estoque baixo tanto no PDV (_criarCardPDV) quanto
+// na aba Produtos (renderizarCardsProdutos) — mesmo mapa, duas telas.
+let _estoqueMap = {};
 
-async function _carregarMapaEstoquePDV() {
+async function _carregarMapaEstoque(lista) {
   const ids = new Set();
-  (produtosCachePDV || []).forEach((p) => {
+  (lista || []).forEach((p) => {
     if (p.inventario_id) ids.add(p.inventario_id);
     const cfg = p.montagem_config;
     if (cfg && cfg.__tipo === "variacoes" && Array.isArray(cfg.variacoes)) {
       cfg.variacoes.forEach((v) => { if (v.inventario_id) ids.add(v.inventario_id); });
     }
   });
-  _pdvEstoqueMap = {};
+  _estoqueMap = {};
   if (!ids.size) return;
   const { data, error } = await supa
     .from("inventario")
@@ -7918,26 +7938,26 @@ async function _carregarMapaEstoquePDV() {
     .in("id", [...ids]);
   if (error || !data) return;
   data.forEach((i) => {
-    _pdvEstoqueMap[i.id] = { quantidade: i.quantidade ?? 0, quantidade_minima: i.quantidade_minima ?? 0 };
+    _estoqueMap[i.id] = { quantidade: i.quantidade ?? 0, quantidade_minima: i.quantidade_minima ?? 0 };
   });
 }
 
-// Calcula o status de estoque de um produto pro badge do card do PDV.
-// Para multivariação, usa a PIOR variação (menor estoque relativo ao seu
-// próprio mínimo) — se uma variação está crítica, o produto inteiro merece
-// o alerta. Retorna null quando não há controle de estoque configurado ou
-// quando o nível está saudável (não passa pelo limiar de "baixo").
-function _statusEstoquePDV(p) {
+// Calcula o status de estoque de um produto pro badge do card (PDV ou
+// Produtos). Para multivariação, usa a PIOR variação (menor estoque
+// relativo ao seu próprio mínimo) — se uma variação está crítica, o
+// produto inteiro merece o alerta. Retorna null quando não há controle de
+// estoque configurado ou quando o nível está saudável (sem badge).
+function _statusEstoque(p) {
   const cfg = p.montagem_config;
   const candidatos = [];
 
-  if (p.inventario_id && _pdvEstoqueMap[p.inventario_id]) {
-    candidatos.push(_pdvEstoqueMap[p.inventario_id]);
+  if (p.inventario_id && _estoqueMap[p.inventario_id]) {
+    candidatos.push(_estoqueMap[p.inventario_id]);
   }
   if (cfg && cfg.__tipo === "variacoes" && Array.isArray(cfg.variacoes)) {
     cfg.variacoes.forEach((v) => {
-      if (v.inventario_id && _pdvEstoqueMap[v.inventario_id]) {
-        candidatos.push(_pdvEstoqueMap[v.inventario_id]);
+      if (v.inventario_id && _estoqueMap[v.inventario_id]) {
+        candidatos.push(_estoqueMap[v.inventario_id]);
       }
     });
   }
@@ -7961,14 +7981,23 @@ function _statusEstoquePDV(p) {
   return null; // estoque saudável — sem badge, evita poluir a grade
 }
 
-// Recarrega o mapa de estoque e re-renderiza a grade do PDV — chamado após
-// qualquer venda que desconte estoque, pra badge não ficar desatualizado
-// durante a mesma sessão. Só re-renderiza se a aba PDV estiver realmente
-// visível (evita trabalho à toa em outras telas).
-async function _atualizarBadgesEstoquePDV() {
-  if (!document.getElementById("pdv")?.offsetParent) return;
-  await _carregarMapaEstoquePDV();
-  if (typeof renderizarGridPDV === "function") renderizarGridPDV();
+// Recarrega o mapa de estoque e re-renderiza a tela relevante (PDV e/ou
+// Produtos) — chamado após qualquer venda que desconte estoque, pra badge
+// não ficar desatualizado durante a mesma sessão. Só re-renderiza a aba
+// que estiver de fato visível, evitando trabalho à toa.
+async function _atualizarBadgesEstoque() {
+  const pdvVisivel = !!document.getElementById("pdv")?.offsetParent;
+  const produtosVisivel = !!document.getElementById("produtos")?.offsetParent;
+  if (!pdvVisivel && !produtosVisivel) return;
+
+  if (pdvVisivel) {
+    await _carregarMapaEstoque(produtosCachePDV);
+    if (typeof renderizarGridPDV === "function") renderizarGridPDV();
+  }
+  if (produtosVisivel) {
+    await _carregarMapaEstoque(_todosProdutos);
+    if (typeof renderizarCardsProdutos === "function") renderizarCardsProdutos(_todosProdutos);
+  }
 }
 
 async function carregarPDV() {
@@ -7985,7 +8014,7 @@ async function carregarPDV() {
 
   // Carrega o mapa de estoque (produto direto + variações) usado pros
   // badges de estoque baixo nos cards do PDV.
-  await _carregarMapaEstoquePDV();
+  await _carregarMapaEstoque(produtosCachePDV);
 
   // Carrega categorias para exibir no PDV
   const { data: cats } = await supa
@@ -8268,7 +8297,7 @@ function _criarCardPDV(p) {
 
   // Badge de estoque baixo — só aparece quando o nível realmente pede
   // atenção (crítico ou em alerta); estoque saudável não polui a grade.
-  const estoqueStatus = _statusEstoquePDV(p);
+  const estoqueStatus = _statusEstoque(p);
   let estoqueBadgeHtml = "";
   if (estoqueStatus) {
     const isCritico = estoqueStatus.nivel === "critico";
@@ -12088,7 +12117,7 @@ async function _descontarEstoqueVendaItens(itens) {
         .catch(() => {});
     }
     console.log(`✅ Estoque descontado: ${estoques.length} item(s)`);
-    _atualizarBadgesEstoquePDV();
+    _atualizarBadgesEstoque();
   } catch (e) {
     console.warn("Estoque desconto (itens):", e.message);
   }
@@ -12168,7 +12197,7 @@ async function _descontarEstoqueVenda(pedidoId, itensDireto) {
     console.log(
       `✅ Estoque descontado: pedido ${pedidoId || "(PDV)"}, ${estoques.length} item(s)`,
     );
-    _atualizarBadgesEstoquePDV();
+    _atualizarBadgesEstoque();
   } catch (e) {
     console.warn("Estoque desconto:", e.message);
   }
