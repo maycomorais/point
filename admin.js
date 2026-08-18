@@ -2000,12 +2000,22 @@ async function calcularFinanceiro() {
     // Acumula por método
     if (isNaNota && isQuitado) {
       totalNaNota += val; // só quitados
+       let formaQuitacao = p.forma_pagamento_quitacao || null;
+        if (!formaQuitacao) {
+          // Fallback: extrai da string obs_pagamento
+          const match = (p.obs_pagamento || "").match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
+          if (match) formaQuitacao = match[1];
+        }
+        if (formaQuitacao) {
+          _acumularMetodo(formaQuitacao, val);
+        }
     } else if (pag === "multipagamento") {
       // Multipagamento: obs_pagamento guarda um JSON com as partes
       // [{ metodo, valor }, ...] — decompõe cada parte no seu próprio
       // total, senão o pedido inteiro desaparece do detalhamento por
       // método (só ficava contado no faturamento total).
       let partes = [];
+
       try { partes = JSON.parse(p.obs_pagamento || "[]"); } catch (_) { partes = []; }
       if (Array.isArray(partes) && partes.length) {
         partes.forEach((parte) => _acumularMetodo(parte.metodo, safeNum(parte.valor)));
@@ -2377,7 +2387,9 @@ async function carregarRelatorio() {
   const filtroNum = document.getElementById("rel-filtro-numero")?.value?.trim();
   const filtroInicio = document.getElementById("rel-filtro-inicio")?.value;
   const filtroFim = document.getElementById("rel-filtro-fim")?.value;
-  const hoje = new Date().toISOString().split("T")[0];
+  const _tz = 3 * 60 * 60 * 1000; // UTC-3 PY
+  const agora = new Date();
+  const hojePY = new Date(agora.getTime() - _tz).toISOString().split("T")[0];
   let query = supa
     .from("pedidos")
     .select("*")
@@ -2386,8 +2398,8 @@ async function carregarRelatorio() {
   if (filtroNum) {
     query = query.eq("id", parseInt(filtroNum));
   } else {
-    const ini = filtroInicio || hoje;
-    const fim = filtroFim || hoje;
+    const ini = filtroInicio || hojePY;
+    const fim = filtroFim || hojePY;
     const _off = 4 * 60 * 60 * 1000;
     const utcIni = new Date(
       new Date(ini + "T00:00:00").getTime() + _off,
@@ -7433,34 +7445,80 @@ async function _uploadLogoIdentidade(input) {
 }
 
 async function carregarDashboard() {
-  // Saudação dinâmica
+  // Saudação
   const hora = new Date().getHours();
-  const saudacao =
-    hora < 12 ? "Bom dia" : hora < 18 ? "Boa tarde" : "Boa noite";
+  const saudacao = hora < 12 ? "Bom dia" : hora < 18 ? "Boa tarde" : "Boa noite";
   const elGreet = document.getElementById("dash-greeting");
   if (elGreet) elGreet.textContent = saudacao + " 👋";
 
   const elDate = document.getElementById("dash-date");
-  if (elDate)
+  if (elDate) {
     elDate.textContent = new Date().toLocaleDateString("pt-BR", {
       weekday: "long",
       day: "numeric",
       month: "long",
     });
+  }
 
-  const hoje = new Date().toISOString().split("T")[0];
+  // ── 1. CARREGA A SESSÃO DE CAIXA ATIVA ──
+  await _carregarSessaoCaixa();
 
-  // Pedidos de hoje entregues
+  // ── 2. DEFINE O PERÍODO ──
+  let utcInicio, utcFim;
+  let usandoSessao = false;
+
+  if (_sessaoCaixaAtiva) {
+    usandoSessao = true;
+    utcInicio = _sessaoCaixaAtiva.aberto_em;
+    utcFim = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
+    console.log(`📊 Dashboard usando sessão de caixa: ${utcInicio} → ${utcFim}`);
+  } else {
+    // Fallback: dia do calendário (UTC-3)
+    const _tz = 3 * 60 * 60 * 1000;
+    const agora = new Date();
+    const hojeLocal = new Date(agora.getTime() - _tz);
+    const hojeStr = hojeLocal.toISOString().split("T")[0];
+    const inicio = new Date(hojeStr + "T00:00:00").getTime() + _tz;
+    const fim = new Date(hojeStr + "T23:59:59").getTime() + _tz;
+    utcInicio = new Date(inicio).toISOString();
+    utcFim = new Date(fim).toISOString();
+    console.log(`📊 Dashboard usando calendário: ${utcInicio} → ${utcFim}`);
+  }
+
+  // ── 3. OCULTA/MOSTRA OS FILTROS DE PERÍODO DOS RANKINGS ──
+  const rankProdFilter = document.getElementById("rank-prod-periodo")?.closest?.(".filter-group");
+  const rankCliFilter = document.getElementById("rank-cli-periodo")?.closest?.(".filter-group");
+  if (rankProdFilter) rankProdFilter.style.display = usandoSessao ? "none" : "flex";
+  if (rankCliFilter) rankCliFilter.style.display = usandoSessao ? "none" : "flex";
+
+  // Opcional: exibe um aviso de que os rankings estão sincronizados com o caixa
+  const avisoRank = document.getElementById("dash-ranking-aviso");
+  if (avisoRank) {
+    if (usandoSessao) {
+      const dAbr = new Date(_sessaoCaixaAtiva.aberto_em).toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      avisoRank.textContent = `📊 Rankings baseados na sessão de caixa aberta desde ${dAbr}`;
+      avisoRank.style.display = "block";
+    } else {
+      avisoRank.style.display = "none";
+    }
+  }
+
+  // ── 4. PEDIDOS ENTREGUES NO PERÍODO ──
   const { data: pedidos } = await supa
     .from("pedidos")
     .select("*")
-    .gte("created_at", hoje)
+    .gte("created_at", utcInicio)
+    .lte("created_at", utcFim)
     .eq("status", "entregue");
-  const total = pedidos
-    ? pedidos.reduce((a, b) => a + (b.total_geral || 0), 0)
-    : 0;
 
-  // Pedidos em preparo
+  const total = pedidos ? pedidos.reduce((a, b) => a + (b.total_geral || 0), 0) : 0;
+
+  // ── 5. PEDIDOS EM PREPARO ──
   const { count: emPreparo } = await supa
     .from("pedidos")
     .select("*", { count: "exact", head: true })
@@ -7470,43 +7528,48 @@ async function carregarDashboard() {
     const el = document.getElementById(id);
     if (el) el.innerText = v;
   };
+
   setVal("kpi-vendas", `Gs ${total.toLocaleString("es-PY")}`);
   setVal("kpi-pedidos", pedidos ? pedidos.length : 0);
-  setVal(
-    "kpi-moto",
-    `Gs ${((pedidos?.length || 0) * TAXA_MOTOBOY + (pedidos?.length > 0 ? AJUDA_COMBUSTIVEL : 0)).toLocaleString("es-PY")}`,
-  );
+
+  const qtdEntregas = pedidos ? pedidos.length : 0;
+  const custoMoto = qtdEntregas * TAXA_MOTOBOY + (qtdEntregas > 0 ? AJUDA_COMBUSTIVEL : 0);
+  setVal("kpi-moto", `Gs ${custoMoto.toLocaleString("es-PY")}`);
   setVal("kpi-em-preparo", emPreparo || 0);
 
-  // === RANKING PRODUTOS ===
-  await carregarRankingProdutos();
-
-  // === RANKING CLIENTES ===
-  await carregarRankingClientes();
-
-  // (tabela legada removida)
+  // ── 6. RANKINGS (usando o MESMO período) ──
+  await carregarRankingProdutos(utcInicio, utcFim);
+  await carregarRankingClientes(utcInicio, utcFim);
 }
 
 // ══════════════════════════════════════════════════════════
 // RANKING PRODUTOS com filtro de período
 // ══════════════════════════════════════════════════════════
-async function carregarRankingProdutos() {
-  const sel = document.getElementById("rank-prod-periodo");
-  const periodo = sel ? sel.value : "hoje";
-  const customBox = document.getElementById("rank-prod-custom");
-  if (customBox)
-    customBox.style.display = periodo === "custom" ? "flex" : "none";
-  const { inicio, fim } = _calcularIntervalo(
-    periodo,
-    "rank-prod-inicio",
-    "rank-prod-fim",
-  );
-
+async function carregarRankingProdutos(inicio = null, fim = null) {
+  // Se recebeu parâmetros, usa eles (prioridade máxima)
   let query = supa.from("pedidos").select("itens").eq("status", "entregue");
-  if (inicio) query = query.gte("created_at", inicio);
-  if (fim) query = query.lte("created_at", fim);
+
+  if (inicio && fim) {
+    // Usa as datas fornecidas (já em UTC)
+    query = query.gte("created_at", inicio).lte("created_at", fim);
+  } else {
+    // Fallback: usa o seletor de período do HTML (quando não há sessão de caixa)
+    const sel = document.getElementById("rank-prod-periodo");
+    const periodo = sel ? sel.value : "hoje";
+    const customBox = document.getElementById("rank-prod-custom");
+    if (customBox) customBox.style.display = periodo === "custom" ? "flex" : "none";
+    const { inicio: i, fim: f } = _calcularIntervalo(
+      periodo,
+      "rank-prod-inicio",
+      "rank-prod-fim"
+    );
+    if (i) query = query.gte("created_at", i);
+    if (f) query = query.lte("created_at", f);
+  }
+
   const { data } = await query;
 
+  // Agrupa por nome do produto
   const cnt = {};
   (data || []).forEach((ped) => {
     (Array.isArray(ped.itens) ? ped.itens : []).forEach((item) => {
@@ -7515,6 +7578,7 @@ async function carregarRankingProdutos() {
       cnt[n] = (cnt[n] || 0) + q;
     });
   });
+
   const ranking = Object.entries(cnt)
     .map(([nome, v]) => ({ nome, v }))
     .sort((a, b) => b.v - a.v)
@@ -7522,10 +7586,12 @@ async function carregarRankingProdutos() {
 
   const el = document.getElementById("ranking-produtos-list");
   if (!el) return;
+
   if (!ranking.length) {
     el.innerHTML = '<div class="rank-vazio">Nenhuma venda no período</div>';
     return;
   }
+
   el.innerHTML = "";
   const max = ranking[0].v;
   ranking.forEach((p, i) => {
@@ -7544,26 +7610,30 @@ async function carregarRankingProdutos() {
 // ══════════════════════════════════════════════════════════
 // RANKING CLIENTES com filtro de período + limpeza de "MESA X -"
 // ══════════════════════════════════════════════════════════
-async function carregarRankingClientes() {
-  const sel = document.getElementById("rank-cli-periodo");
-  const periodo = sel ? sel.value : "tudo";
-  const customBox = document.getElementById("rank-cli-custom");
-  if (customBox)
-    customBox.style.display = periodo === "custom" ? "flex" : "none";
-  const { inicio, fim } = _calcularIntervalo(
-    periodo,
-    "rank-cli-inicio",
-    "rank-cli-fim",
-  );
-
+async function carregarRankingClientes(inicio = null, fim = null) {
   let query = supa
     .from("pedidos")
     .select("cliente_nome, cliente_telefone, total_geral")
     .eq("status", "entregue")
     .order("created_at", { ascending: false })
     .limit(1000);
-  if (inicio) query = query.gte("created_at", inicio);
-  if (fim) query = query.lte("created_at", fim);
+
+  if (inicio && fim) {
+    query = query.gte("created_at", inicio).lte("created_at", fim);
+  } else {
+    const sel = document.getElementById("rank-cli-periodo");
+    const periodo = sel ? sel.value : "tudo";
+    const customBox = document.getElementById("rank-cli-custom");
+    if (customBox) customBox.style.display = periodo === "custom" ? "flex" : "none";
+    const { inicio: i, fim: f } = _calcularIntervalo(
+      periodo,
+      "rank-cli-inicio",
+      "rank-cli-fim"
+    );
+    if (i) query = query.gte("created_at", i);
+    if (f) query = query.lte("created_at", f);
+  }
+
   const { data } = await query;
 
   const map = {};
@@ -7584,12 +7654,15 @@ async function carregarRankingClientes() {
   const top = Object.values(map)
     .sort((a, b) => b.qtd - a.qtd)
     .slice(0, 8);
+
   const el = document.getElementById("ranking-clientes-list");
   if (!el) return;
+
   if (!top.length) {
     el.innerHTML = '<div class="rank-vazio">Nenhum cliente no período</div>';
     return;
   }
+
   el.innerHTML = "";
   const max = top[0].qtd;
   top.forEach((c, i) => {

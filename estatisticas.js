@@ -49,8 +49,11 @@ async function _estCarregarFichas() {
 // ──────────────────────────────────────────────────────────────
 async function gerarEstatisticas() {
   const hoje = new Date().toISOString().split('T')[0];
-  const ini  = (document.getElementById('est-ini')?.value || hoje) + 'T00:00:00';
-  const fim  = (document.getElementById('est-fim')?.value || hoje) + 'T23:59:59';
+  const _tz = 3 * 60 * 60 * 1000; // UTC-3 PY
+  const iniDate = document.getElementById('est-ini')?.value || hoje;
+  const fimDate = document.getElementById('est-fim')?.value || hoje;
+  const utcIni = new Date(new Date(iniDate + 'T00:00:00').getTime() + _tz).toISOString();
+  const utcFim = new Date(new Date(fimDate + 'T23:59:59').getTime() + _tz).toISOString();
 
   _estSetLoading(true);
 
@@ -58,8 +61,8 @@ async function gerarEstatisticas() {
     .from('pedidos')
     .select('id, itens, total_geral, subtotal, desconto_cupom, desconto_pdv_valor, created_at, status')
     .in('status', ['entregue', 'em_preparo', 'pronto_entrega', 'saiu_entrega'])
-    .gte('created_at', ini)
-    .lte('created_at', fim);
+    .gte('created_at', utcIni)   // ← CORRIGIDO: usa utcIni
+    .lte('created_at', utcFim);  // ← CORRIGIDO: usa utcFim
 
   if (error) {
     console.error('gerarEstatisticas:', error);
@@ -79,7 +82,7 @@ function _estRender() {
   const filtCat     = (document.getElementById('est-filtro-cat')?.value   || '').toLowerCase().trim();
   const filtUnidade = (document.getElementById('est-filtro-unidade')?.value || '');
 
-  // ── Mapa nome→categoria para lookup (ignora variação)
+  // ── Mapa nome→categoria para lookup (ignora variação) ──
   const mapCat = {};
   _est_produtos.forEach(p => {
     mapCat[(p.nome || '').toLowerCase()] = {
@@ -88,8 +91,8 @@ function _estRender() {
     };
   });
 
-  // ── Agrega itens de todos os pedidos, usando chave composta: nome|variação
-  const agrupado = {};  // chave: "nome|variação" ou apenas "nome"
+  // ── Agrega itens de todos os pedidos, usando chave composta: nome|variação ──
+  const agrupado = {};
 
   _est_pedidos.forEach(pedido => {
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
@@ -108,7 +111,7 @@ function _estRender() {
       const categoria = refProd.categoria || '';
       const unidade   = isKg ? 'kg' : (refProd.unidade || 'un');
 
-      // ── Filtros
+      // ── Filtros ──
       if (filtCat && !categoria.toLowerCase().includes(filtCat)) return;
       if (filtUnidade === 'kg' && !isKg) return;
       if (filtUnidade === 'un' && isKg) return;
@@ -132,38 +135,25 @@ function _estRender() {
 
   const produtos = Object.values(agrupado);
 
-  // ── KPIs globais (não mudam)
+  // ── KPIs: apenas entradas financeiras (faturamento) ──
   const faturamentoTotal = _est_pedidos.reduce((s, p) => s + (p.total_geral || 0), 0);
   const ticketMedio      = _est_pedidos.length ? faturamentoTotal / _est_pedidos.length : 0;
+  const totalPedidos     = _est_pedidos.length;
 
-  // ── Lucro estimado: usa ficha técnica do produto base (ignora variação)
-  let lucroTotal = 0;
-  produtos.forEach(prod => {
-    const ficha = _est_fichas.find(f =>
-      f.produto_nome.toLowerCase() === prod.nome.toLowerCase()
-    );
-    if (ficha) {
-      const custo = (ficha.ficha_itens || []).reduce((s, fi) =>
-        s + fi.quantidade * (fi.insumos?.preco_custo || 0), 0
-      );
-      const markup   = ficha.markup_percent || 300;
-      const margemPct = markup / (100 + markup);
-      lucroTotal += prod.faturamento * margemPct;
-    } else {
-      lucroTotal += prod.faturamento * 0.5;
-    }
-  });
-
-  // ── KPI Cards
+  // Atualiza os cards
   _estSetKPI('est-kpi-faturamento', `Gs ${Math.round(faturamentoTotal).toLocaleString('es-PY')}`);
   _estSetKPI('est-kpi-ticket',      `Gs ${Math.round(ticketMedio).toLocaleString('es-PY')}`);
-  _estSetKPI('est-kpi-lucro',       `Gs ${Math.round(lucroTotal).toLocaleString('es-PY')}`);
-  _estSetKPI('est-kpi-pedidos',     _est_pedidos.length.toLocaleString('es-PY'));
+  _estSetKPI('est-kpi-pedidos',     totalPedidos.toLocaleString('es-PY'));
+  _estSetKPI('est-kpi-entradas',    `Gs ${Math.round(faturamentoTotal).toLocaleString('es-PY')}`);
 
-  // ── Tabela de produtos (com variação)
+  // Oculta o card de lucro (já que não é mais usado)
+  const lucroCard = document.getElementById('est-kpi-lucro');
+  if (lucroCard) lucroCard.parentElement.style.display = 'none';
+
+  // ── Tabela de produtos (com variação) ──
   _estRenderTabela(produtos);
 
-  // ── Gráfico de barras (top 15 por faturamento, com nome+variação)
+  // ── Gráfico de barras (top 15 por faturamento) ──
   _estRenderGrafico(produtos);
 }
 
