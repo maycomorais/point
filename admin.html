@@ -897,33 +897,38 @@
       <h3 style="margin: 0; color: #444" data-i18n="fin.caixa_ctrl">Controle de Caixa</h3>
     </div>
 
+    
     <div class="actions-grid">
       <button class="action-card ac-abrir" onclick="abrirModalCaixa('abertura')">
         <i class="fas fa-door-open"></i>
         <span data-i18n="caixa.titulo_abrir">Abrir Caixa</span>
       </button>
-
+      
       <button class="action-card ac-suprir" onclick="abrirModalCaixa('suprimento')">
         <i class="fas fa-plus-circle"></i>
         <span data-i18n="caixa.titulo_suprimento">Suprimento</span>
       </button>
-
+      
       <button class="action-card ac-sangria" onclick="abrirModalCaixa('sangria')">
         <i class="fas fa-hand-holding-usd"></i>
         <span data-i18n="caixa.titulo_sangria">Sangria</span>
       </button>
-
+      
       <button class="action-card ac-despesa" onclick="abrirModalCaixa('despesa')">
         <i class="fas fa-file-invoice-dollar"></i>
         <span data-i18n="caixa.titulo_despesa">Despesa</span>
       </button>
-
+      
       <button class="action-card ac-fechar" onclick="fecharCaixaResumo()">
         <i class="fas fa-calculator"></i>
         <span data-i18n="caixa.fechar_dia">Fechar Dia</span>
       </button>
     </div>
   </div>
+
+
+  <!-- HISTÓRICO DE CAIXA -->
+  <div id="historico-caixa-placeholder"></div>
 
   <!-- ===== KPIs PRINCIPAIS ===== -->
   <div class="kpi-grid">

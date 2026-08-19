@@ -44,25 +44,34 @@ async function _estCarregarFichas() {
   _est_fichas = data || [];
 }
 
-// ──────────────────────────────────────────────────────────────
-//  FUNÇÃO PRINCIPAL
-// ──────────────────────────────────────────────────────────────
+// ============================================================
+//  ESTATÍSTICAS — usando helper global _obterPeriodoFinanceiro()
+// ============================================================
 async function gerarEstatisticas() {
-  const hoje = new Date().toISOString().split('T')[0];
-  const _tz = 3 * 60 * 60 * 1000; // UTC-3 PY
-  const iniDate = document.getElementById('est-ini')?.value || hoje;
-  const fimDate = document.getElementById('est-fim')?.value || hoje;
-  const utcIni = new Date(new Date(iniDate + 'T00:00:00').getTime() + _tz).toISOString();
-  const utcFim = new Date(new Date(fimDate + 'T23:59:59').getTime() + _tz).toISOString();
-
   _estSetLoading(true);
 
+  // 1. Obtém período via helper global
+  const { utcInicio, utcFim } = window._obterPeriodoFinanceiro();
+
+  // Atualiza os campos de data para exibição (se vazios)
+  const elIni = document.getElementById('est-ini');
+  const elFim = document.getElementById('est-fim');
+  if (elIni && !elIni.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    elIni.value = new Date(new Date(utcInicio).getTime() - _tz).toISOString().split('T')[0];
+  }
+  if (elFim && !elFim.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    elFim.value = new Date(new Date(utcFim).getTime() - _tz).toISOString().split('T')[0];
+  }
+
+  // 2. Busca pedidos com critérios unificados
   const { data, error } = await supa
     .from('pedidos')
-    .select('id, itens, total_geral, subtotal, desconto_cupom, desconto_pdv_valor, created_at, status')
+    .select('id, itens, total_geral, subtotal, desconto_cupom, desconto_pdv_valor, created_at, status, forma_pagamento, obs_pagamento, tipo_entrega')
     .in('status', ['entregue', 'em_preparo', 'pronto_entrega', 'saiu_entrega'])
-    .gte('created_at', utcIni)   // ← CORRIGIDO: usa utcIni
-    .lte('created_at', utcFim);  // ← CORRIGIDO: usa utcFim
+    .gte('created_at', utcInicio)
+    .lte('created_at', utcFim);
 
   if (error) {
     console.error('gerarEstatisticas:', error);
@@ -70,7 +79,16 @@ async function gerarEstatisticas() {
     return;
   }
 
-  _est_pedidos = data || [];
+  // Filtra NaNota não quitado e Mensalista
+  const pedsFiltrados = (data || []).filter((p) => {
+    const pag = (p.forma_pagamento || "").toLowerCase();
+    const isNaNota = pag === "nanota";
+    const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
+    if ((isNaNota && !isQuitado) || pag === "mensalista") return false;
+    return true;
+  });
+
+  _est_pedidos = pedsFiltrados;
   _estRender();
   _estSetLoading(false);
 }

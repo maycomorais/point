@@ -144,6 +144,7 @@ let WHATSAPP_LOJA_CFG = ""; // whatsapp_loja (dígitos)
 let NOME_RESTAURANTE = ""; // nome_restaurante
 let FEATURES_ATIVAS = null; // features_ativas JSONB
 let TABELA_FRETE_ADMIN = null; // tabela_frete (carregada do banco para calcularFretePDV)
+let COTACAO_REAL = 1100;
 
 let perfilUsuario = null;
 let _perfilId = null; // UUID do usuário logado
@@ -188,6 +189,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     lastTab = "dashboard";
   }
   showTab(lastTab);
+
+  document.getElementById("fin-inicio")?.addEventListener("input", () => {
+    _finFiltroManualAtivo = true;
+  });
+  document.getElementById("fin-fim")?.addEventListener("input", () => {
+    _finFiltroManualAtivo = true;
+  });
 
   // Timeout de segurança: se o overlay travar por mais de 8s, remove forçado
   setTimeout(() => {
@@ -633,25 +641,23 @@ async function _carregarFeaturesGlobais() {
   const { data } = await supa
     .from("configuracoes")
     .select(
-      "features_ativas, nome_restaurante, whatsapp_loja, coord_lat, coord_lng, taxa_motoboy_base, ajuda_combustivel, chave_pix, nome_pix, dados_alias, nome_alias, tabela_frete",
+      "features_ativas, nome_restaurante, whatsapp_loja, coord_lat, coord_lng, taxa_motoboy_base, ajuda_combustivel, chave_pix, nome_pix, dados_alias, nome_alias, tabela_frete, cotacao_real"
     )
     .maybeSingle();
   if (!data) return;
   FEATURES_ATIVAS = data.features_ativas || null;
-  // Globals operacionais
   if (data.nome_restaurante) NOME_RESTAURANTE = data.nome_restaurante;
   if (data.whatsapp_loja) WHATSAPP_LOJA_CFG = data.whatsapp_loja;
   if (data.coord_lat) COORD_LOJA.lat = parseFloat(data.coord_lat);
   if (data.coord_lng) COORD_LOJA.lng = parseFloat(data.coord_lng);
   if (data.taxa_motoboy_base != null) TAXA_MOTOBOY = data.taxa_motoboy_base;
-  if (data.ajuda_combustivel != null)
-    AJUDA_COMBUSTIVEL = data.ajuda_combustivel;
+  if (data.ajuda_combustivel != null) AJUDA_COMBUSTIVEL = data.ajuda_combustivel;
   if (data.chave_pix) CHAVE_PIX_CFG = data.chave_pix;
   if (data.nome_pix) NOME_PIX_CFG = data.nome_pix;
   if (data.dados_alias) DADOS_ALIAS_CFG = data.dados_alias;
   if (data.nome_alias) NOME_ALIAS_CFG = data.nome_alias;
-  if (data.tabela_frete && Array.isArray(data.tabela_frete))
-    TABELA_FRETE_ADMIN = data.tabela_frete;
+  if (data.tabela_frete && Array.isArray(data.tabela_frete)) TABELA_FRETE_ADMIN = data.tabela_frete;
+  if (data.cotacao_real) COTACAO_REAL = Number(data.cotacao_real);
 }
 
 // ── Filtra formas de pagamento em todos os selects conforme features_ativas.pagamentos ──
@@ -1741,6 +1747,49 @@ let _caixaState = {
   qtdPedidos: 0,
 };
 
+window._obterPeriodoFinanceiro = function() {
+  const elInicio = document.getElementById("fin-inicio");
+  const elFim    = document.getElementById("fin-fim");
+  const ehGestor = ["dono", "gerente", "adminMaster"].includes(perfilUsuario);
+
+  let utcInicio, utcFim, usandoSessao = false;
+
+  // Se o usuário preencheu as datas manualmente, usá-las (prioridade máxima)
+  if (elInicio?.value && elFim?.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    utcInicio = new Date(new Date(elInicio.value + "T00:00:00").getTime() + _tz).toISOString();
+    utcFim    = new Date(new Date(elFim.value   + "T23:59:59").getTime() + _tz).toISOString();
+    // Marca como uso manual para não sobrescrever os campos
+    _finFiltroManualAtivo = true;
+    return { utcInicio, utcFim, usandoSessao: false };
+  }
+
+  // Caso contrário, usa a sessão de caixa ativa
+  if (_sessaoCaixaAtiva) {
+    utcInicio = _sessaoCaixaAtiva.aberto_em;
+    utcFim    = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
+    usandoSessao = true;
+    // Preenche os campos com a data da sessão para feedback visual
+    const _tz = 3 * 60 * 60 * 1000;
+    if (elInicio && !elInicio.value) {
+      elInicio.value = new Date(new Date(utcInicio).getTime() - _tz).toISOString().split("T")[0];
+    }
+    if (elFim && !elFim.value) {
+      elFim.value = new Date(new Date(utcFim).getTime() - _tz).toISOString().split("T")[0];
+    }
+    return { utcInicio, utcFim, usandoSessao };
+  }
+
+  // Fallback: dia atual
+  const hoje = new Date().toISOString().split("T")[0];
+  const _tz = 3 * 60 * 60 * 1000;
+  utcInicio = new Date(new Date(hoje + "T00:00:00").getTime() + _tz).toISOString();
+  utcFim    = new Date(new Date(hoje + "T23:59:59").getTime() + _tz).toISOString();
+  if (elInicio && !elInicio.value) elInicio.value = hoje;
+  if (elFim && !elFim.value) elFim.value = hoje;
+  return { utcInicio, utcFim, usandoSessao: false };
+};
+
 // Sessão de caixa ativa (carregada ao abrir a aba financeiro)
 let _sessaoCaixaAtiva = null;
 // { id, usuario_email, aberto_em, fechado_em, valor_abertura }
@@ -1842,89 +1891,51 @@ async function _abrirSessaoCaixa(valorAbertura, descricao) {
   return data;
 }
 
+// ============================================================
+//  FINANCEIRO — usando helper _obterPeriodoFinanceiro()
+// ============================================================
 async function calcularFinanceiro() {
   const abaFin = document.getElementById("financeiro");
   if (!abaFin || !abaFin.classList.contains("active")) return;
 
-  const elInicio  = document.getElementById("fin-inicio");
-  const elFim     = document.getElementById("fin-fim");
   const elTipo    = document.getElementById("fin-tipo");
   const elFactura = document.getElementById("fin-factura");
-  if (!elInicio || !elFim || !elTipo) return;
+  if (!elTipo) return;
 
   const ehGestor   = ["dono", "gerente", "adminMaster"].includes(perfilUsuario);
   const emailAtual = document.getElementById("user-email")?.innerText || "";
 
-  // ── 1. Carrega/verifica sessão ativa ─────────────────────────────
   await _carregarSessaoCaixa();
+  const { utcInicio, utcFim } = _obterPeriodoFinanceiro();
 
-  // ── 2. Se não houver sessão aberta ───────────────────────────────
-  if (!_sessaoCaixaAtiva) {
-    if (ehGestor) {
-      if (!elInicio.value || !elFim.value) {
-        const hoje = new Date().toISOString().split("T")[0];
-        if (!elInicio.value) elInicio.value = hoje;
-        if (!elFim.value)    elFim.value    = hoje;
-      }
-    } else {
-      _exibirAlertaAberturaCaixa();
-      return;
-    }
+  const elInicio = document.getElementById("fin-inicio");
+  const elFim    = document.getElementById("fin-fim");
+  if (elInicio && !elInicio.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    elInicio.value = new Date(new Date(utcInicio).getTime() - _tz).toISOString().split("T")[0];
   }
-
-  // ── 3. Define intervalo de tempo ──────────────────────────────────
-  const _tz = 3 * 60 * 60 * 1000; // UTC-3 PY
-  let utcI, utcF;
-
-  if (ehGestor && _finFiltroManualAtivo && elInicio.value && elFim.value) {
-    utcI = new Date(new Date(elInicio.value + "T00:00:00").getTime() + _tz).toISOString();
-    utcF = new Date(new Date(elFim.value   + "T23:59:59").getTime() + _tz).toISOString();
-  } else if (_sessaoCaixaAtiva) {
-    const sessaoInicio = _sessaoCaixaAtiva.aberto_em;
-    const sessaoFim    = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
-    utcI = sessaoInicio;
-    utcF = sessaoFim;
-    // Preenche os campos só para EXIBIÇÃO (data já ajustada pro fuso PY,
-    // não mais UTC cru) — não redefine mais sozinho qual janela é usada;
-    // isso só acontece se o gestor editar os campos manualmente.
-    if (!elInicio.value) elInicio.value = new Date(new Date(sessaoInicio).getTime() - _tz).toISOString().split("T")[0];
-    if (!elFim.value)    elFim.value    = new Date(new Date(sessaoFim).getTime() - _tz).toISOString().split("T")[0];
-  } else {
-    const hoje = new Date().toISOString().split("T")[0];
-    utcI = new Date(new Date(hoje + "T00:00:00").getTime() + _tz).toISOString();
-    utcF = new Date(new Date(hoje + "T23:59:59").getTime() + _tz).toISOString();
+  if (elFim && !elFim.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    elFim.value = new Date(new Date(utcFim).getTime() - _tz).toISOString().split("T")[0];
   }
 
   const tipoFiltro    = elTipo.value;
   const facturaFiltro = elFactura ? elFactura.value : "todos";
 
-  // ── Oculta/exibe elementos exclusivos de gestor na UI ─────────────
-  const _elFiltrosGestor = document.getElementById("fin-filtros-gestor");
-  if (_elFiltrosGestor) _elFiltrosGestor.style.display = ehGestor ? "" : "none";
-  const _elSecDespesas = document.getElementById("secao-despesas-caixa");
-  if (_elSecDespesas) _elSecDespesas.style.display = ehGestor ? "" : "none";
-  const _elSecMotoboys = document.getElementById("secao-motoboys-financeiro");
-  if (_elSecMotoboys) _elSecMotoboys.style.display = ehGestor ? "" : "none";
-
-  // ── 4. Busca pedidos dentro da janela da sessão ───────────────────
   let query = supa
     .from("pedidos")
     .select("*, motoboys(nome)")
     .in("status", ["entregue", "em_preparo", "pronto_entrega", "saiu_entrega"])
-    .gte("created_at", utcI)
-    .lte("created_at", utcF);
+    .gte("created_at", utcInicio)
+    .lte("created_at", utcFim);
 
   if (tipoFiltro !== "todos") {
-    // "QrMaquina" também precisa cobrir "QrMarina" — valor gravado em
-    // pedidos antigos por causa de um typo já corrigido no seletor do PDV
-    // (ver fix_qrmarina_qrmaquina.sql para migrar os registros antigos).
     if (tipoFiltro === "QrMaquina") {
       query = query.in("forma_pagamento", ["QrMaquina", "QrMarina"]);
     } else {
       query = query.eq("forma_pagamento", tipoFiltro);
     }
   }
-
   if (!ehGestor && _perfilId) query = query.eq("garcom_id", _perfilId);
 
   const { data: pedidos } = await query;
@@ -1935,7 +1946,7 @@ async function calcularFinanceiro() {
   else if (facturaFiltro === "sem_factura")
     peds = peds.filter((p) => !p.dados_factura?.ruc && !p.dados_factura?.ci);
 
-  // ── 5. Movimentações de caixa ─────────────────────────────────────
+  // Movimentações de caixa
   let caixa = [];
   if (_sessaoCaixaAtiva?.id) {
     let caixaQuery = supa
@@ -1949,37 +1960,34 @@ async function calcularFinanceiro() {
     const { data: caixaData } = await supa
       .from("movimentacoes_caixa")
       .select("*")
-      .gte("created_at", utcI)
-      .lte("created_at", utcF);
+      .gte("created_at", utcInicio)
+      .lte("created_at", utcFim);
     caixa = caixaData || [];
   }
 
   if (_sessaoCaixaAtiva) _verificarBloqueioCaixa(emailAtual);
 
-  // ── 6. CÁLCULOS (CORRIGIDO) ──────────────────────────────────────
   const safeNum = (v) => {
     if (!v) return 0;
     if (typeof v === "number") return v;
     return parseFloat(v.toString().replace(/[^\d.,-]/g,"").replace(",",".")) || 0;
   };
   const fmt = (n) => "Gs " + n.toLocaleString("es-PY");
+  const fmtBRL = (n) => "R$ " + n.toFixed(2).replace(".", ",");
 
-  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0, totalNaNota = 0;
-  let totalQrCelular = 0, totalQrMaquina = 0;
+  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0,
+      totalEfetivo = 0, totalNaNota = 0, totalQrCelular = 0, totalQrMaquina = 0;
   let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
 
-  // Acumula um valor num dos totais por método — usada tanto para pedidos
-  // com forma_pagamento única quanto para cada parte de um Multipagamento
-  // (evita duplicar a lógica de matching em dois lugares diferentes).
   function _acumularMetodo(metodoRaw, valor) {
     const m = (metodoRaw || "").toLowerCase().trim();
     if (m.includes("pix")) totalPix += valor;
     else if (m.includes("transfer")) totalTransf += valor;
     else if (m.includes("cartao") || m.includes("cartão")) totalCartao += valor;
     else if (m.includes("efetivo") || m.includes("dinheiro")) totalEfetivo += valor;
-    else if (m === "qrmaquina" || m === "qrmarina") totalQrMaquina += valor; // "qrmarina" = typo legado (pedidos antigos), tratado como alias
-    else if (m.includes("qr")) totalQrCelular += valor;  // qrcelular, qrpy e demais variantes de QR
+    else if (m === "qrmaquina" || m === "qrmarina") totalQrMaquina += valor;
+    else if (m.includes("qr")) totalQrCelular += valor;
   }
 
   peds.forEach((p) => {
@@ -1987,36 +1995,23 @@ async function calcularFinanceiro() {
     const isNaNota = pag === "nanota";
     const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
 
-    // ═══ PULAR: NaNota não quitado ou Mensalista ═══
-    if ((isNaNota && !isQuitado) || pag === "mensalista") {
-      // Não soma ao faturamento nem conta como pedido
-      return;
-    }
+    if ((isNaNota && !isQuitado) || pag === "mensalista") return;
 
     const val = safeNum(p.total_geral);
     faturamento += val;
     qtdPedidos++;
 
-    // Acumula por método
     if (isNaNota && isQuitado) {
-      totalNaNota += val; // só quitados
-       let formaQuitacao = p.forma_pagamento_quitacao || null;
-        if (!formaQuitacao) {
-          // Fallback: extrai da string obs_pagamento
-          const match = (p.obs_pagamento || "").match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
-          if (match) formaQuitacao = match[1];
-        }
-        if (formaQuitacao) {
-          _acumularMetodo(formaQuitacao, val);
-        }
+      totalNaNota += val;
+      let formaQuitacao = p.forma_pagamento_quitacao || null;
+      if (!formaQuitacao) {
+        const match = (p.obs_pagamento || "").match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
+        if (match) formaQuitacao = match[1];
+      }
+      if (formaQuitacao) _acumularMetodo(formaQuitacao, val);
     } else if (pag === "multipagamento") {
-      // Multipagamento: obs_pagamento guarda um JSON com as partes
-      // [{ metodo, valor }, ...] — decompõe cada parte no seu próprio
-      // total, senão o pedido inteiro desaparece do detalhamento por
-      // método (só ficava contado no faturamento total).
       let partes = [];
-
-      try { partes = JSON.parse(p.obs_pagamento || "[]"); } catch (_) { partes = []; }
+      try { partes = JSON.parse(p.obs_pagamento || "[]"); } catch (_) {}
       if (Array.isArray(partes) && partes.length) {
         partes.forEach((parte) => _acumularMetodo(parte.metodo, safeNum(parte.valor)));
       }
@@ -2024,7 +2019,6 @@ async function calcularFinanceiro() {
       _acumularMetodo(pag, val);
     }
 
-    // Custo entregas (somente delivery)
     if (p.tipo_entrega === "delivery") {
       const taxa = safeNum(p.frete_motoboy) || TAXA_MOTOBOY || 0;
       custoEntregas += taxa;
@@ -2046,12 +2040,15 @@ async function calcularFinanceiro() {
     if (c.tipo === "suprimento" || c.tipo === "abertura" || c.tipo === "entrada") totalEntradas += v;
   });
 
+  // Fundo de abertura (para exibição separada)
   const fundoAbertura = safeNum(_sessaoCaixaAtiva?.valor_abertura);
-  totalEfetivo += fundoAbertura;
+  // NÃO somamos ao totalEfetivo
 
-  _caixaState = { faturamento, custoEntregas, totalSaidas, totalEntradas,
-                  totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
-                  totalQrCelular, totalQrMaquina, qtdPedidos, totalSangria, fundoAbertura };
+  _caixaState = {
+    faturamento, custoEntregas, totalSaidas, totalEntradas,
+    totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
+    totalQrCelular, totalQrMaquina, qtdPedidos, totalSangria, fundoAbertura
+  };
 
   const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
@@ -2059,18 +2056,26 @@ async function calcularFinanceiro() {
   setV("card-faturamento",  fmt(faturamento));
   setV("card-custo-moto",   fmt(custoEntregas));
   setV("card-lucro",        fmt(lucro));
-  setV("total-pix",         fmt(totalPix));
+
+  // Total Pix com valor em Reais
+  const totalPixBRL = COTACAO_REAL > 0 ? totalPix / COTACAO_REAL : 0;
+  const pixDisplay = totalPix > 0 ? `${fmt(totalPix)} (≈ ${fmtBRL(totalPixBRL)})` : fmt(totalPix);
+  setV("total-pix", pixDisplay);
+
   setV("total-transf",      fmt(totalTransf));
   setV("total-cartao",      fmt(totalCartao));
-  setV("total-efetivo",     fmt(totalEfetivo));
+  setV("total-efetivo",     fmt(totalEfetivo));  // Agora sem o fundo
   setV("total-nanota",      fmt(totalNaNota));
-  setV("total-qr",          fmt(totalQrCelular)); // id do elemento deve ser "total-qr"
+  setV("total-qr",          fmt(totalQrCelular));
   setV("total-qrmaquina",   fmt(totalQrMaquina));
-  setV("total-fundo-abertura", fmt(fundoAbertura));
+  setV("total-fundo-abertura", fmt(fundoAbertura)); // Mantido separado
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
 
-  // Badge do operador / info da sessão
+  // Renderiza histórico de caixa
+  renderizarHistoricoCaixa(caixa, _sessaoCaixaAtiva);
+
+  // ... (restante do código: badgeCaixa, tabelas de despesas e motoboys)
   const badgeCaixa = document.getElementById("badge-caixa-operador");
   if (badgeCaixa) {
     if (_sessaoCaixaAtiva) {
@@ -2082,11 +2087,11 @@ async function calcularFinanceiro() {
         ? `📊 Visão geral — sessão ${_sessaoCaixaAtiva.id} (${_sessaoCaixaAtiva.usuario_email}) · ${dAbr} → ${dFch}`
         : `💼 Seu caixa — aberto ${dAbr} → ${dFch}`;
     } else {
-      badgeCaixa.textContent = `📊 Visão geral — ${elInicio.value} até ${elFim.value} (sem sessão de caixa)`;
+      badgeCaixa.textContent = `📊 Visão geral — ${elInicio?.value || ""} até ${elFim?.value || ""} (sem sessão de caixa)`;
     }
   }
 
-  // ── Tabelas de despesas e motoboys (mantido) ──────────────────────
+  // Tabela de despesas (mesmo código anterior)
   const tbD = document.getElementById("lista-despesas-caixa");
   if (tbD) {
     const despesas = (caixa || []).filter((c) => c.tipo === "despesa");
@@ -2137,6 +2142,143 @@ async function calcularFinanceiro() {
       }
     }
   }
+}
+
+// ============================================================
+//  RENDERIZA HISTÓRICO DE CAIXA (colapsável)
+// ============================================================
+function renderizarHistoricoCaixa(movimentacoes, sessao) {
+  // Procura a seção colapsável. Se não existir, cria.
+  let section = document.getElementById("historico-caixa-section");
+  if (!section) {
+    // Usa um placeholder fixo no HTML, se existir
+    const placeholder = document.getElementById("historico-caixa-placeholder");
+    if (placeholder) {
+      section = document.createElement("details");
+      section.id = "historico-caixa-section";
+      section.style.cssText = "margin-top:16px; border:1px solid #e0e0e0; border-radius:8px; padding:12px; background:#fafafa;";
+
+      const summary = document.createElement("summary");
+      summary.style.cssText = "font-weight:700; font-size:1rem; cursor:pointer; color:var(--primary);";
+      summary.textContent = "📋 Histórico de Caixa";
+      section.appendChild(summary);
+
+      // Container da tabela
+      const container = document.createElement("div");
+      container.style.cssText = "margin-top:12px; max-height:300px; overflow-y:auto;";
+      container.id = "historico-caixa-container";
+      section.appendChild(container);
+
+      // Botão de impressão
+      const btnDiv = document.createElement("div");
+      btnDiv.style.cssText = "margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;";
+      const btnImprimir = document.createElement("button");
+      btnImprimir.onclick = imprimirHistoricoCaixa;
+      btnImprimir.style.cssText = "background:#2c3e50; color:#fff; border:none; border-radius:6px; padding:6px 14px; cursor:pointer; font-weight:600;";
+      btnImprimir.textContent = "🖨️ Imprimir Histórico";
+      btnDiv.appendChild(btnImprimir);
+      section.appendChild(btnDiv);
+
+      // Adiciona ao placeholder
+      placeholder.appendChild(section);
+    } else {
+      console.warn("Elemento #historico-caixa-placeholder não encontrado. Histórico de caixa não será inserido.");
+      return;
+    }
+  }
+
+  // Agora popular o container
+  const container = document.getElementById("historico-caixa-container");
+  if (!container) return;
+
+  if (!movimentacoes || movimentacoes.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:20px; color:#aaa;">Nenhuma movimentação nesta sessão.</div>';
+    return;
+  }
+
+  // Ordena por data (mais recente primeiro)
+  const sorted = [...movimentacoes].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  // Mapeia tipos para labels
+  const tipoLabels = {
+    abertura: "🟢 Abertura",
+    suprimento: "➕ Suprimento",
+    sangria: "➖ Sangria",
+    despesa: "🧾 Despesa",
+    entrada: "📥 Entrada",
+    fechamento: "🔒 Fechamento"
+  };
+
+  let html = `<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+    <thead>
+      <tr style="background:#f0f0f0;">
+        <th style="text-align:left; padding:6px;">Data/Hora</th>
+        <th style="text-align:left; padding:6px;">Tipo</th>
+        <th style="text-align:left; padding:6px;">Descrição</th>
+        <th style="text-align:right; padding:6px;">Valor (Gs)</th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  sorted.forEach(m => {
+    const dt = new Date(m.created_at).toLocaleString("pt-BR", { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" });
+    const tipo = tipoLabels[m.tipo] || m.tipo;
+    const desc = m.descricao || (m.tipo_despesa ? `Despesa: ${m.tipo_despesa}` : '');
+    const valor = m.valor || 0;
+    const cor = m.tipo === "despesa" || m.tipo === "sangria" ? "#c0392b" : "#27ae60";
+    const sinal = (m.tipo === "despesa" || m.tipo === "sangria") ? "-" : "";
+    html += `<tr style="border-bottom:1px solid #eee;">
+      <td style="padding:6px;">${dt}</td>
+      <td style="padding:6px;">${tipo}</td>
+      <td style="padding:6px;">${desc}</td>
+      <td style="text-align:right; padding:6px; font-weight:600; color:${cor};">${sinal} Gs ${valor.toLocaleString("es-PY")}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+}
+
+// ============================================================
+//  IMPRIMIR HISTÓRICO DE CAIXA
+// ============================================================
+function imprimirHistoricoCaixa() {
+  const container = document.getElementById("historico-caixa-container");
+  if (!container) {
+    alert("Nenhum histórico disponível para impressão.");
+    return;
+  }
+  // Abre uma janela com o conteúdo formatado para impressão
+  const win = window.open('', '_blank', 'width=700,height=500');
+  if (!win) {
+    alert("Permita pop-ups para imprimir.");
+    return;
+  }
+  const conteudo = container.innerHTML;
+  const titulo = NOME_RESTAURANTE || "Histórico de Caixa";
+  win.document.write(`<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Histórico de Caixa</title>
+<style>
+  body { font-family:Arial,sans-serif; font-size:12px; padding:20px; }
+  h2 { text-align:center; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; }
+  th, td { border:1px solid #ccc; padding:6px; text-align:left; }
+  th { background:#f0f0f0; }
+  .total { font-weight:700; text-align:right; padding:8px; }
+  @media print { body { padding:10px; } }
+</style>
+</head>
+<body>
+  <h2>${titulo} - Histórico de Caixa</h2>
+  ${conteudo}
+  <p style="text-align:center; margin-top:20px; font-size:10px; color:#888;">Impresso em ${new Date().toLocaleString("pt-BR")}</p>
+  <script>
+    window.onload = function() { window.print(); }
+  <\/script>
+</body>
+</html>`);
+  win.document.close();
 }
 
 // ── Verifica bloqueio por sangria limite ───────────────────────────
@@ -6923,6 +7065,9 @@ async function carregarConfiguracoes() {
     if (box2) box2.style.display = "block";
   }
 
+  // Atualiza a cotação (UMA ÚNICA VEZ)
+  if (data.cotacao_real) COTACAO_REAL = Number(data.cotacao_real);
+
   // Visual
   const sc = (id, val) => {
     const el = document.getElementById(id);
@@ -7027,6 +7172,8 @@ async function salvarConfiguracoes() {
   NOME_PIX_CFG = dados.nome_pix;
   DADOS_ALIAS_CFG = dados.dados_alias;
   NOME_ALIAS_CFG = dados.nome_alias;
+
+  if (dados.cotacao_real) COTACAO_REAL = Number(dados.cotacao_real);
 
   const { error } = await supa.from("configuracoes").update(dados).gt("id", 0);
   if (error) alert("Erro: " + error.message);
@@ -7444,6 +7591,9 @@ async function _uploadLogoIdentidade(input) {
   }
 }
 
+// ============================================================
+//  DASHBOARD — usando helper _obterPeriodoFinanceiro()
+// ============================================================
 async function carregarDashboard() {
   // Saudação
   const hora = new Date().getHours();
@@ -7454,52 +7604,22 @@ async function carregarDashboard() {
   const elDate = document.getElementById("dash-date");
   if (elDate) {
     elDate.textContent = new Date().toLocaleDateString("pt-BR", {
-      weekday: "long",
-      day: "numeric",
-      month: "long",
+      weekday: "long", day: "numeric", month: "long"
     });
   }
 
-  // ── 1. CARREGA A SESSÃO DE CAIXA ATIVA ──
+  // 1. Carrega sessão ativa (necessária para o helper)
   await _carregarSessaoCaixa();
 
-  // ── 2. DEFINE O PERÍODO ──
-  let utcInicio, utcFim;
-  let usandoSessao = false;
+  // 2. Obtém o período via helper (usado para os KPIs e para passar aos rankings)
+  const { utcInicio, utcFim, usandoSessao } = _obterPeriodoFinanceiro();
 
-  if (_sessaoCaixaAtiva) {
-    usandoSessao = true;
-    utcInicio = _sessaoCaixaAtiva.aberto_em;
-    utcFim = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
-    console.log(`📊 Dashboard usando sessão de caixa: ${utcInicio} → ${utcFim}`);
-  } else {
-    // Fallback: dia do calendário (UTC-3)
-    const _tz = 3 * 60 * 60 * 1000;
-    const agora = new Date();
-    const hojeLocal = new Date(agora.getTime() - _tz);
-    const hojeStr = hojeLocal.toISOString().split("T")[0];
-    const inicio = new Date(hojeStr + "T00:00:00").getTime() + _tz;
-    const fim = new Date(hojeStr + "T23:59:59").getTime() + _tz;
-    utcInicio = new Date(inicio).toISOString();
-    utcFim = new Date(fim).toISOString();
-    console.log(`📊 Dashboard usando calendário: ${utcInicio} → ${utcFim}`);
-  }
-
-  // ── 3. OCULTA/MOSTRA OS FILTROS DE PERÍODO DOS RANKINGS ──
-  const rankProdFilter = document.getElementById("rank-prod-periodo")?.closest?.(".filter-group");
-  const rankCliFilter = document.getElementById("rank-cli-periodo")?.closest?.(".filter-group");
-  if (rankProdFilter) rankProdFilter.style.display = usandoSessao ? "none" : "flex";
-  if (rankCliFilter) rankCliFilter.style.display = usandoSessao ? "none" : "flex";
-
-  // Opcional: exibe um aviso de que os rankings estão sincronizados com o caixa
+  // 3. Atualiza o aviso sobre a sessão (sem ocultar os filtros)
   const avisoRank = document.getElementById("dash-ranking-aviso");
   if (avisoRank) {
     if (usandoSessao) {
       const dAbr = new Date(_sessaoCaixaAtiva.aberto_em).toLocaleString("pt-BR", {
-        day: "2-digit",
-        month: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
+        day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
       });
       avisoRank.textContent = `📊 Rankings baseados na sessão de caixa aberta desde ${dAbr}`;
       avisoRank.style.display = "block";
@@ -7508,17 +7628,27 @@ async function carregarDashboard() {
     }
   }
 
-  // ── 4. PEDIDOS ENTREGUES NO PERÍODO ──
+  // 4. Busca pedidos com critérios unificados (para os KPIs)
   const { data: pedidos } = await supa
     .from("pedidos")
     .select("*")
+    .in("status", ["entregue", "em_preparo", "pronto_entrega", "saiu_entrega"])
     .gte("created_at", utcInicio)
-    .lte("created_at", utcFim)
-    .eq("status", "entregue");
+    .lte("created_at", utcFim);
 
-  const total = pedidos ? pedidos.reduce((a, b) => a + (b.total_geral || 0), 0) : 0;
+  // Filtra NaNota não quitado e Mensalista
+  const pedsFiltrados = (pedidos || []).filter((p) => {
+    const pag = (p.forma_pagamento || "").toLowerCase();
+    const isNaNota = pag === "nanota";
+    const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
+    if ((isNaNota && !isQuitado) || pag === "mensalista") return false;
+    return true;
+  });
 
-  // ── 5. PEDIDOS EM PREPARO ──
+  const total = pedsFiltrados.reduce((a, b) => a + (b.total_geral || 0), 0);
+  const qtdPedidos = pedsFiltrados.length;
+
+  // 5. Pedidos em preparo (sem filtro de pagamento)
   const { count: emPreparo } = await supa
     .from("pedidos")
     .select("*", { count: "exact", head: true })
@@ -7530,16 +7660,56 @@ async function carregarDashboard() {
   };
 
   setVal("kpi-vendas", `Gs ${total.toLocaleString("es-PY")}`);
-  setVal("kpi-pedidos", pedidos ? pedidos.length : 0);
+  setVal("kpi-pedidos", qtdPedidos);
 
-  const qtdEntregas = pedidos ? pedidos.length : 0;
-  const custoMoto = qtdEntregas * TAXA_MOTOBOY + (qtdEntregas > 0 ? AJUDA_COMBUSTIVEL : 0);
+  // Custo entregas (igual ao financeiro)
+  let custoMoto = 0;
+  const motosUnicas = new Set();
+  pedsFiltrados.forEach((p) => {
+    if (p.tipo_entrega === "delivery") {
+      const taxa = parseFloat(p.frete_motoboy) || TAXA_MOTOBOY || 0;
+      custoMoto += taxa;
+      if (p.motoboy_id) motosUnicas.add(p.motoboy_id);
+    }
+  });
+  custoMoto += (AJUDA_COMBUSTIVEL || 0) * motosUnicas.size;
   setVal("kpi-moto", `Gs ${custoMoto.toLocaleString("es-PY")}`);
   setVal("kpi-em-preparo", emPreparo || 0);
 
-  // ── 6. RANKINGS (usando o MESMO período) ──
+  // 6. Rankings — passamos as datas da sessão (se houver) para que usem o mesmo período
+  //    Mas se o usuário alterar os filtros manualmente, as funções internas
+  //    ignorarão essas datas e lerão o seletor de período.
   await carregarRankingProdutos(utcInicio, utcFim);
   await carregarRankingClientes(utcInicio, utcFim);
+}
+
+// ============================================================
+//  HELPER — obter período com base na sessão ou filtro manual
+// ============================================================
+function _obterPeriodoFinanceiro() {
+  // Retorna { utcInicio, utcFim, usandoSessao }
+  const elInicio = document.getElementById("fin-inicio");
+  const elFim    = document.getElementById("fin-fim");
+  const ehGestor = ["dono", "gerente", "adminMaster"].includes(perfilUsuario);
+
+  let utcInicio, utcFim, usandoSessao = false;
+
+  if (ehGestor && _finFiltroManualAtivo && elInicio?.value && elFim?.value) {
+    const _tz = 3 * 60 * 60 * 1000;
+    utcInicio = new Date(new Date(elInicio.value + "T00:00:00").getTime() + _tz).toISOString();
+    utcFim    = new Date(new Date(elFim.value   + "T23:59:59").getTime() + _tz).toISOString();
+  } else if (_sessaoCaixaAtiva) {
+    utcInicio = _sessaoCaixaAtiva.aberto_em;
+    utcFim    = _sessaoCaixaAtiva.fechado_em || new Date().toISOString();
+    usandoSessao = true;
+  } else {
+    const hoje = new Date().toISOString().split("T")[0];
+    const _tz = 3 * 60 * 60 * 1000;
+    utcInicio = new Date(new Date(hoje + "T00:00:00").getTime() + _tz).toISOString();
+    utcFim    = new Date(new Date(hoje + "T23:59:59").getTime() + _tz).toISOString();
+  }
+
+  return { utcInicio, utcFim, usandoSessao };
 }
 
 // ══════════════════════════════════════════════════════════
