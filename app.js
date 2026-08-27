@@ -3324,6 +3324,38 @@ function _calcularFreteComBaseNaUltimaFaixa(dist) {
 
 // ── Fallback antigo (mantido para compatibilidade) ──
 function _calcularFreteFallback(dist) {
+  if (dist <= 1) return 8000;
+  else if (dist <= 2) return 10000;
+  else if (dist <= 3) return 12000;
+  else if (dist <= 4) return 14000;
+  else return 24000 + Math.ceil(dist - 4.1) * 2000;
+}
+
+// ── Helper: calcular frete usando a última faixa como base ──
+function _calcularFreteComBaseNaUltimaFaixa(dist) {
+  // Última faixa: índice 19 (limite 20 km)
+  const ultimoIndice = 19;
+  let base = 0;
+  if (TABELA_FRETE && TABELA_FRETE[ultimoIndice]) {
+    base = TABELA_FRETE[ultimoIndice].loja || 0;
+  } else {
+    // Fallback: se não houver tabela, usa 24000 (valor antigo para 6km+)
+    base = 24000;
+  }
+
+  // Valor adicional por km excedente (fixo)
+  const ADICIONAL_POR_KM = 3000;
+
+  // Se a distância for menor ou igual a 20, usa apenas a base
+  if (dist <= 20) return base;
+
+  // Calcular km excedentes (arredondado para cima)
+  const kmExcedente = Math.ceil(dist - 20);
+  return base + (kmExcedente * ADICIONAL_POR_KM);
+}
+
+// ── Fallback antigo (mantido para compatibilidade) ──
+function _calcularFreteFallback(dist) {
   if (dist <= 2) return 8000;
   else if (dist <= 3) return 10000;
   else if (dist <= 4) return 12000;

@@ -1993,16 +1993,23 @@ async function calcularFinanceiro() {
   peds.forEach((p) => {
     const pag = (p.forma_pagamento || "").toLowerCase();
     const isNaNota = pag === "nanota";
-    const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado");
+    const isQuitado = (p.obs_pagamento || "").toLowerCase().includes("[quitado") || !!p.quitado_em;
 
-    if ((isNaNota && !isQuitado) || pag === "mensalista") return;
+    // NaNota NÃO quitado: não entra no faturamento, exibido em "Na Nota"
+    if (isNaNota && !isQuitado) {
+      totalNaNota += safeNum(p.total_geral);
+      return;
+    }
+
+    // Mensalista: pula
+    if (pag === "mensalista") return;
 
     const val = safeNum(p.total_geral);
     faturamento += val;
     qtdPedidos++;
 
+    // NaNota QUITADO: soma na forma de pagamento real, NÃO entra em totalNaNota
     if (isNaNota && isQuitado) {
-      totalNaNota += val;
       let formaQuitacao = p.forma_pagamento_quitacao || null;
       if (!formaQuitacao) {
         const match = (p.obs_pagamento || "").match(/Forma:\s*([A-Za-zÀ-ú]+)/i);
@@ -2019,6 +2026,7 @@ async function calcularFinanceiro() {
       _acumularMetodo(pag, val);
     }
 
+    // Custo entregas (delivery)
     if (p.tipo_entrega === "delivery") {
       const taxa = safeNum(p.frete_motoboy) || TAXA_MOTOBOY || 0;
       custoEntregas += taxa;
@@ -2032,50 +2040,47 @@ async function calcularFinanceiro() {
   const qtdMotoboyUnicos = Object.keys(motoMap).filter(n => n !== "Sem Motoboy").length;
   custoEntregas += (AJUDA_COMBUSTIVEL || 0) * qtdMotoboyUnicos;
 
-  let totalSaidas = 0, totalEntradas = 0, totalSangria = 0;
+  // Despesas (saídas) - apenas despesas e sangrias
+  let totalSaidas = 0;
   (caixa || []).forEach((c) => {
     const v = safeNum(c.valor);
-    if (c.tipo === "despesa")                                      totalSaidas  += v;
-    if (c.tipo === "sangria")                                    { totalSaidas  += v; totalSangria += v; }
-    if (c.tipo === "suprimento" || c.tipo === "abertura" || c.tipo === "entrada") totalEntradas += v;
+    if (c.tipo === "despesa" || c.tipo === "sangria") {
+      totalSaidas += v;
+    }
   });
 
-  // Fundo de abertura (para exibição separada)
   const fundoAbertura = safeNum(_sessaoCaixaAtiva?.valor_abertura);
-  // NÃO somamos ao totalEfetivo
 
-  _caixaState = {
-    faturamento, custoEntregas, totalSaidas, totalEntradas,
-    totalPix, totalTransf, totalCartao, totalEfetivo, totalNaNota,
-    totalQrCelular, totalQrMaquina, qtdPedidos, totalSangria, fundoAbertura
-  };
+  // ════════════════════════════════════════════════════════════════
+  //  LUCRO = faturamento - custoEntregas - totalSaidas
+  //  NÃO soma entradas (abertura, quitação de NaNota, etc.)
+  // ════════════════════════════════════════════════════════════════
+  const lucro = faturamento - custoEntregas - totalSaidas;
 
-  const lucro = faturamento + totalEntradas - custoEntregas - totalSaidas;
   const setV  = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
 
   setV("card-faturamento",  fmt(faturamento));
   setV("card-custo-moto",   fmt(custoEntregas));
   setV("card-lucro",        fmt(lucro));
 
-  // Total Pix com valor em Reais
   const totalPixBRL = COTACAO_REAL > 0 ? totalPix / COTACAO_REAL : 0;
   const pixDisplay = totalPix > 0 ? `${fmt(totalPix)} (≈ ${fmtBRL(totalPixBRL)})` : fmt(totalPix);
   setV("total-pix", pixDisplay);
 
   setV("total-transf",      fmt(totalTransf));
   setV("total-cartao",      fmt(totalCartao));
-  setV("total-efetivo",     fmt(totalEfetivo));  // Agora sem o fundo
+  setV("total-efetivo",     fmt(totalEfetivo));
   setV("total-nanota",      fmt(totalNaNota));
   setV("total-qr",          fmt(totalQrCelular));
   setV("total-qrmaquina",   fmt(totalQrMaquina));
-  setV("total-fundo-abertura", fmt(fundoAbertura)); // Mantido separado
+  setV("total-fundo-abertura", fmt(fundoAbertura));
   setV("card-qtd-pedidos",  qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
 
-  // Renderiza histórico de caixa
-  renderizarHistoricoCaixa(caixa, _sessaoCaixaAtiva);
+  if (typeof renderizarHistoricoCaixa === "function") {
+    renderizarHistoricoCaixa(caixa, _sessaoCaixaAtiva);
+  }
 
-  // ... (restante do código: badgeCaixa, tabelas de despesas e motoboys)
   const badgeCaixa = document.getElementById("badge-caixa-operador");
   if (badgeCaixa) {
     if (_sessaoCaixaAtiva) {
@@ -2091,7 +2096,7 @@ async function calcularFinanceiro() {
     }
   }
 
-  // Tabela de despesas (mesmo código anterior)
+  // Tabela de despesas
   const tbD = document.getElementById("lista-despesas-caixa");
   if (tbD) {
     const despesas = (caixa || []).filter((c) => c.tipo === "despesa");
@@ -2123,6 +2128,7 @@ async function calcularFinanceiro() {
     }
   }
 
+  // Tabela de motoboys
   const tbM = document.getElementById("lista-financeiro-motoboys");
   if (tbM) {
     tbM.innerHTML = "";
