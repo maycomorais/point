@@ -3212,7 +3212,7 @@ function _executarGetPosition(btn, msg, boxErro) {
       );
 
       // ── TABELA DE FRETE ────────────────────────────────────
-      // Faixas: [0-1], [1.1-2], ..., [19.1-20] (mesmo do admin)
+      // Faixas: [0-1], [1.1-2], ..., [19.1-20]
       const LIMITES_KM = [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20
@@ -3220,24 +3220,16 @@ function _executarGetPosition(btn, msg, boxErro) {
 
       let frete = 0;
       let faixaEncontrada = false;
-      let freteBase = 0;
-      let ultimoLimite = 0;
 
       // Procura a faixa correspondente
       for (let i = 0; i < LIMITES_KM.length; i++) {
         if (dist <= LIMITES_KM[i]) {
           faixaEncontrada = true;
-          ultimoLimite = LIMITES_KM[i];
 
           if (TABELA_FRETE && TABELA_FRETE[i]) {
             const faixa = TABELA_FRETE[i];
-            // Se NÃO estiver marcado como "a combinar", usa o valor da loja
-            if (faixa.acombinar !== true) {
-              frete = faixa.loja || 0;
-            } else {
-              // Está marcado "a combinar" → usa a última faixa como base
-              frete = _calcularFreteComBaseNaUltimaFaixa(dist);
-            }
+            // SEMPRE usa o valor da loja, independente do "a combinar"
+            frete = faixa.loja || 0;
           } else {
             // Tabela não configurada: fallback
             frete = _calcularFreteFallback(dist);
@@ -3253,9 +3245,7 @@ function _executarGetPosition(btn, msg, boxErro) {
 
       // Guarda o valor calculado
       freteCalculado = frete;
-      // freteMotoboy (valor pago ao motoboy) – pode ser o mesmo ou usar a tabela
-      // Para simplificar, usamos o mesmo valor (ou pode ser ajustado)
-      freteMotoboy = frete;
+      freteMotoboy = frete; // ou use a tabela se preferir
 
       // Exibe mensagem
       const kmExtra = dist > 20 ? (dist - 20).toFixed(1) : 0;
