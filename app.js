@@ -248,6 +248,10 @@ if (typeof supa === "undefined") {
 // ==========================================
 let carrinho = [];
 let freteCalculado = 0;
+// Marca quando o frete foi resolvido via fallback (GPS falhou, aplicou
+// o mínimo da tabela) — usada na validação do checkout pra não travar
+// o pedido pedindo pra "combinar pelo WhatsApp" à toa.
+let _freteResolvidoSemGps = false;
 let freteMotoboy = 0; // Valor pago ao motoboy (da tabela de frete)
 let localCliente = null;
 let modoEntrega = "delivery";
@@ -2554,6 +2558,7 @@ function limparCarrinho() {
     freteCalculado = 0;
     freteMotoboy = 0;
     localCliente = null;
+    _freteResolvidoSemGps = false;
     updateUI();
   }
 }
@@ -2652,6 +2657,7 @@ function fecharCheckout() {
     freteCalculado = 0;
     freteMotoboy = 0;
     localCliente = null;
+    _freteResolvidoSemGps = false;
   }
 }
 
@@ -3161,13 +3167,14 @@ async function calcularFrete() {
   btn.disabled = true;
 
   if (!navigator.geolocation) {
-    // GPS não disponível → usa o valor mínimo da tabela (última faixa)
+    // GPS não disponível → usa o valor mínimo da tabela (faixa de 0-1km)
     const freteMinimo = _obterFreteMinimoDaTabela();
     freteCalculado = freteMinimo;
     freteMotoboy = freteMinimo;
-    msg.innerHTML = `<span style="color:#e67e22">⚠️ GPS indisponível. Frete mínimo: Gs ${freteMinimo.toLocaleString("es-PY")}</span>`;
+    _freteResolvidoSemGps = true;
+    msg.innerHTML = `<span style="color:#e67e22">⚠️ GPS indisponível. Frete mínimo aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}. O valor pode aumentar se a entrega for mais distante.</span>`;
     boxErro.style.display = "none";
-    btn.innerText = "✅ Frete definido";
+    btn.innerText = "✅ Frete mínimo aplicado";
     btn.disabled = true;
     atualizarTotalCheckout();
     return;
@@ -3179,21 +3186,23 @@ async function calcularFrete() {
       .query({ name: "geolocation" })
       .then((result) => {
         if (result.state === "denied") {
-          // Permissão negada → usa frete mínimo
+          // Permissão negada → usa frete mínimo (faixa de 0-1km)
           const freteMinimo = _obterFreteMinimoDaTabela();
           freteCalculado = freteMinimo;
           freteMotoboy = freteMinimo;
-          msg.innerHTML = `<span style="color:#e67e22">⚠️ GPS bloqueado. Frete mínimo: Gs ${freteMinimo.toLocaleString("es-PY")}</span>`;
+          _freteResolvidoSemGps = true;
+          msg.innerHTML = `<span style="color:#e67e22">⚠️ GPS bloqueado. Frete mínimo aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</span>`;
           boxErro.innerHTML = `
             <p><strong><i class="fas fa-lock"></i> Permissão de localização bloqueada</strong></p>
             <p style="margin-top:6px;font-size:0.85rem">Para habilitar: clique no ícone de cadeado/info na barra de endereço do navegador → <strong>Localização</strong> → <strong>Permitir</strong> → recarregue a página.</p>
-            <p style="margin-top:8px;font-size:0.85rem;color:#27ae60"><strong>Frete aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></p>
+            <p style="margin-top:8px;font-size:0.85rem;color:#27ae60"><strong>Frete mínimo aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></p>
+            <p style="margin-top:6px;font-size:0.85rem;color:#e67e22">⚠️ O valor do delivery pode aumentar caso o endereço de entrega seja mais distante do que a faixa mínima.</p>
             <label style="display:flex;align-items:center;gap:10px;margin-top:10px;cursor:pointer;">
               <input type="checkbox" id="check-sem-gps" style="width:20px;height:20px;">
               <span data-lang-key="gps-erro-check">Enviaré mi ubicación por WhatsApp</span>
             </label>`;
           boxErro.style.display = "block";
-          btn.innerText = "✅ Localização OK";
+          btn.innerText = "✅ Frete mínimo aplicado";
           btn.disabled = true;
           atualizarTotalCheckout();
           return;
@@ -3208,301 +3217,19 @@ async function calcularFrete() {
   }
 }
 
-// ── Executa a leitura do GPS ────────────────────────────────
-function _executarGetPosition(btn, msg, boxErro) {
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      localCliente = {
-        lat: position.coords.latitude,
-        lng: position.coords.longitude,
-      };
-      const dist = calcularDistancia(
-        COORD_LOJA.lat,
-        COORD_LOJA.lng,
-        localCliente.lat,
-        localCliente.lng,
-      );
-
-      // ── CALCULA FRETE ──────────────────────────────────────
-      const frete = _calcularFretePorDistancia(dist);
-      freteCalculado = frete;
-      freteMotoboy = frete;
-
-      // Exibe mensagem
-      const kmExtra = dist > 20 ? (dist - 20).toFixed(1) : 0;
-      let msgHtml = `<span style="color:#27ae60">✅ Distância: ${dist.toFixed(1)} km → Frete: Gs ${frete.toLocaleString("es-PY")}</span>`;
-      if (kmExtra > 0) {
-        msgHtml += ` <span style="color:#e67e22;font-size:0.8rem">(inclui +Gs ${Math.ceil(kmExtra * 3000).toLocaleString("es-PY")} por km adicional)</span>`;
-      }
-      msg.innerHTML = msgHtml;
-      msg.style.color = "#27ae60";
-      boxErro.style.display = "none";
-
-      btn.innerText = "✅ Localização OK";
-      btn.disabled = true;
-      atualizarTotalCheckout();
-    },
-    (err) => {
-      // ── GPS falhou → usa frete mínimo ─────────────────────
-      const freteMinimo = _obterFreteMinimoDaTabela();
-      freteCalculado = freteMinimo;
-      freteMotoboy = freteMinimo;
-
-      let errMsg = "Não foi possível obter sua localização.";
-      let instrucao = "";
-      if (err.code === 1) {
-        errMsg = "⚠️ Permissão de GPS negada.";
-        instrucao = '<p style="margin-top:6px;font-size:0.85rem">Para habilitar: clique no ícone de cadeado/info na barra de endereço → <strong>Localização</strong> → <strong>Permitir</strong> → recarregue a página.</p>';
-      } else if (err.code === 2) {
-        errMsg = "⚠️ Localização indisponível. Verifique se o GPS está ativo.";
-      } else if (err.code === 3) {
-        errMsg = "⚠️ Tempo esgotado ao obter localização. Tente novamente.";
-      }
-      msg.innerHTML = `<span style="color:#e67e22">${errMsg} <strong>Frete mínimo: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></span>`;
-      boxErro.innerHTML = `
-        <p><strong><i class="fas fa-info-circle"></i> GPS não funcionou?</strong></p>
-        ${instrucao}
-        <p style="margin-top:8px;font-size:0.85rem;color:#27ae60"><strong>Frete aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></p>
-        <label style="display:flex;align-items:center;gap:10px;margin-top:10px;cursor:pointer;">
-          <input type="checkbox" id="check-sem-gps" style="width:20px;height:20px;">
-          <span data-lang-key="gps-erro-check">Enviaré mi ubicación por WhatsApp</span>
-        </label>`;
-      boxErro.style.display = "block";
-      btn.innerText = "✅ Frete definido";
-      btn.disabled = true;
-      atualizarTotalCheckout();
-    },
-    { timeout: 12000, maximumAge: 60000, enableHighAccuracy: true },
-  );
-}
-
-// ── Calcula o frete com base na distância (nunca retorna "a combinar") ──
-function _calcularFretePorDistancia(dist) {
-  const LIMITES_KM = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    11, 12, 13, 14, 15, 16, 17, 18, 19, 20
-  ];
-
-  let frete = 0;
-  let faixaEncontrada = false;
-
-  // Procura a faixa correspondente
-  for (let i = 0; i < LIMITES_KM.length; i++) {
-    if (dist <= LIMITES_KM[i]) {
-      faixaEncontrada = true;
-      if (TABELA_FRETE && TABELA_FRETE[i]) {
-        const faixa = TABELA_FRETE[i];
-        // Se NÃO estiver marcado como "a combinar", usa o valor da loja
-        if (faixa.acombinar !== true) {
-          frete = faixa.loja || 0;
-        } else {
-          // Está marcado "a combinar" → usa a última faixa como base
-          frete = _calcularFreteComBaseNaUltimaFaixa(dist);
-        }
-      } else {
-        // Tabela não configurada: fallback
-        frete = _calcularFreteFallback(dist);
-      }
-      break;
-    }
-  }
-
-  // Se a distância ultrapassou a última faixa (acima de 20 km)
-  if (!faixaEncontrada) {
-    frete = _calcularFreteComBaseNaUltimaFaixa(dist);
-  }
-
-  return frete;
-}
-
-// ── Helper: frete mínimo da tabela (última faixa) ───────────
+// ── Helper: frete mínimo da tabela (primeira faixa, 0-1km) ──
+// ⚠️ CORRIGIDO: usava índice 19 (faixa de 19-20km, a mais CARA) em vez
+// do índice 0 (faixa de 0-1km, a mais barata). "Frete mínimo" tem que
+// ser o menor valor da tabela, não o maior.
 function _obterFreteMinimoDaTabela() {
-  const ultimoIndice = 19; // faixa de 20 km
   let base = 0;
-  if (TABELA_FRETE && TABELA_FRETE[ultimoIndice]) {
-    base = TABELA_FRETE[ultimoIndice].loja || 0;
+  if (TABELA_FRETE && TABELA_FRETE[0]) {
+    base = TABELA_FRETE[0].loja || 0;
   } else {
-    // Fallback: valor padrão mínimo
+    // Fallback: valor padrão mínimo, só usado se a tabela não estiver configurada
     base = 6000;
   }
   return base;
-}
-
-// ── Helper: calcular frete usando a última faixa como base ──
-function _calcularFreteComBaseNaUltimaFaixa(dist) {
-  const base = _obterFreteMinimoDaTabela();
-  const ADICIONAL_POR_KM = 3000;
-
-  if (dist <= 20) return base;
-
-  const kmExcedente = Math.ceil(dist - 20);
-  return base + (kmExcedente * ADICIONAL_POR_KM);
-}
-
-// ── Fallback antigo (mantido para compatibilidade) ──────────
-function _calcularFreteFallback(dist) {
-  if (dist <= 1) return 6000;
-  else if (dist <= 2) return 8000;
-  else if (dist <= 3) return 10000;
-  else if (dist <= 4) return 12000;
-  else if (dist <= 5) return 14000;
-  else return 14000 + Math.ceil(dist - 5) * 2000;
-}
-
-function _executarGetPosition(btn, msg, boxErro) {
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      localCliente = {
-        lat: position.coords.latitude,
-        lng: position.coords.longitude,
-      };
-      const dist = calcularDistancia(
-        COORD_LOJA.lat,
-        COORD_LOJA.lng,
-        localCliente.lat,
-        localCliente.lng,
-      );
-
-      // ── TABELA DE FRETE ────────────────────────────────────
-      // Faixas: [0-1], [1.1-2], ..., [19.1-20]
-      const LIMITES_KM = [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-        11, 12, 13, 14, 15, 16, 17, 18, 19, 20
-      ];
-
-      let frete = 0;
-      let faixaEncontrada = false;
-
-      // Procura a faixa correspondente
-      for (let i = 0; i < LIMITES_KM.length; i++) {
-        if (dist <= LIMITES_KM[i]) {
-          faixaEncontrada = true;
-
-          if (TABELA_FRETE && TABELA_FRETE[i]) {
-            const faixa = TABELA_FRETE[i];
-            // SEMPRE usa o valor da loja, independente do "a combinar"
-            frete = faixa.loja || 0;
-          } else {
-            // Tabela não configurada: fallback
-            frete = _calcularFreteFallback(dist);
-          }
-          break;
-        }
-      }
-
-      // Se a distância ultrapassou a última faixa (acima de 20 km)
-      if (!faixaEncontrada) {
-        frete = _calcularFreteComBaseNaUltimaFaixa(dist);
-      }
-
-      // Guarda o valor calculado
-      freteCalculado = frete;
-      freteMotoboy = frete; // ou use a tabela se preferir
-
-      // Exibe mensagem
-      const kmExtra = dist > 20 ? (dist - 20).toFixed(1) : 0;
-      let msgHtml = `<span style="color:#27ae60">✅ Distância: ${dist.toFixed(1)} km → Frete: Gs ${frete.toLocaleString("es-PY")}</span>`;
-      if (kmExtra > 0) {
-        msgHtml += ` <span style="color:#e67e22;font-size:0.8rem">(inclui +Gs ${(kmExtra * 3000).toLocaleString("es-PY")} por km adicional)</span>`;
-      }
-      msg.innerHTML = msgHtml;
-      msg.style.color = "#27ae60";
-      boxErro.style.display = "none";
-
-      btn.innerText = "✅ Localização OK";
-      btn.disabled = true;
-      atualizarTotalCheckout();
-    },
-    (err) => {
-      let errMsg = "Não foi possível obter sua localização.";
-      let instrucao = "";
-      if (err.code === 1) {
-        errMsg = "⚠️ Permissão de GPS negada.";
-        instrucao = '<p style="margin-top:6px;font-size:0.85rem">Para habilitar: clique no ícone de cadeado/info na barra de endereço → <strong>Localização</strong> → <strong>Permitir</strong> → recarregue a página.</p>';
-      } else if (err.code === 2) {
-        errMsg = "⚠️ Localização indisponível. Verifique se o GPS está ativo.";
-      } else if (err.code === 3) {
-        errMsg = "⚠️ Tempo esgotado ao obter localização. Tente novamente.";
-      }
-      msg.innerHTML = `<span style="color:#e74c3c">${errMsg}</span>`;
-      boxErro.innerHTML = `
-        <p><strong><i class="fas fa-info-circle"></i> GPS não funcionou?</strong></p>
-        ${instrucao}
-        <p style="margin-top:6px">Marque a opção abaixo para enviar sua localização pelo WhatsApp.</p>
-        <label style="display:flex;align-items:center;gap:10px;margin-top:8px;cursor:pointer;">
-          <input type="checkbox" id="check-sem-gps" style="width:20px;height:20px;">
-          <span data-lang-key="gps-erro-check">Enviaré mi ubicación por WhatsApp</span>
-        </label>`;
-      boxErro.style.display = "block";
-      btn.innerText = "📍 Tentar Novamente";
-      btn.disabled = false;
-    },
-    { timeout: 12000, maximumAge: 60000, enableHighAccuracy: true },
-  );
-}
-
-// ── Helper: calcular frete usando a última faixa como base ──
-function _calcularFreteComBaseNaUltimaFaixa(dist) {
-  // Última faixa: índice 19 (limite 20 km)
-  const ultimoIndice = 19;
-  let base = 0;
-  if (TABELA_FRETE && TABELA_FRETE[ultimoIndice]) {
-    base = TABELA_FRETE[ultimoIndice].loja || 0;
-  } else {
-    // Fallback: se não houver tabela, usa 24000 (valor antigo para 6km+)
-    base = 24000;
-  }
-
-  // Valor adicional por km excedente (fixo)
-  const ADICIONAL_POR_KM = 3000;
-
-  // Se a distância for menor ou igual a 20, usa apenas a base
-  if (dist <= 20) return base;
-
-  // Calcular km excedentes (arredondado para cima)
-  const kmExcedente = Math.ceil(dist - 20);
-  return base + (kmExcedente * ADICIONAL_POR_KM);
-}
-
-// ── Fallback antigo (mantido para compatibilidade) ──
-function _calcularFreteFallback(dist) {
-  if (dist <= 1) return 8000;
-  else if (dist <= 2) return 10000;
-  else if (dist <= 3) return 12000;
-  else if (dist <= 4) return 14000;
-  else return 24000 + Math.ceil(dist - 4.1) * 2000;
-}
-
-// ── Helper: calcular frete usando a última faixa como base ──
-function _calcularFreteComBaseNaUltimaFaixa(dist) {
-  // Última faixa: índice 19 (limite 20 km)
-  const ultimoIndice = 19;
-  let base = 0;
-  if (TABELA_FRETE && TABELA_FRETE[ultimoIndice]) {
-    base = TABELA_FRETE[ultimoIndice].loja || 0;
-  } else {
-    // Fallback: se não houver tabela, usa 24000 (valor antigo para 6km+)
-    base = 24000;
-  }
-
-  // Valor adicional por km excedente (fixo)
-  const ADICIONAL_POR_KM = 3000;
-
-  // Se a distância for menor ou igual a 20, usa apenas a base
-  if (dist <= 20) return base;
-
-  // Calcular km excedentes (arredondado para cima)
-  const kmExcedente = Math.ceil(dist - 20);
-  return base + (kmExcedente * ADICIONAL_POR_KM);
-}
-
-// ── Fallback antigo (mantido para compatibilidade) ──
-function _calcularFreteFallback(dist) {
-  if (dist <= 2) return 8000;
-  else if (dist <= 3) return 10000;
-  else if (dist <= 4) return 12000;
-  else if (dist <= 5) return 14000;
-  else return 24000 + Math.ceil(dist - 6.2) * 3000;
 }
 
 function _executarGetPosition(btn, msg, boxErro) {
@@ -3581,6 +3308,15 @@ function _executarGetPosition(btn, msg, boxErro) {
       atualizarTotalCheckout();
     },
     (err) => {
+      // ⚠️ CORRIGIDO: antes disso só mostrava "marque a opção pra combinar
+      // pelo WhatsApp" e travava o pedido até o cliente fazer isso
+      // manualmente. Agora aplica automaticamente o frete mínimo da
+      // tabela (faixa de 0-1km) e deixa claro que pode aumentar depois.
+      const freteMinimo = _obterFreteMinimoDaTabela();
+      freteCalculado = freteMinimo;
+      freteMotoboy = freteMinimo;
+      _freteResolvidoSemGps = true;
+
       let errMsg = "Não foi possível obter sua localização.";
       let instrucao = "";
       if (err.code === 1) {
@@ -3595,18 +3331,21 @@ function _executarGetPosition(btn, msg, boxErro) {
         // TIMEOUT
         errMsg = "⚠️ Tempo esgotado ao obter localização. Tente novamente.";
       }
-      msg.innerHTML = `<span style="color:#e74c3c">${errMsg}</span>`;
+      msg.innerHTML = `<span style="color:#e67e22">${errMsg} <strong>Frete mínimo aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></span>`;
+      msg.style.color = "#e67e22";
       boxErro.innerHTML = `
         <p><strong><i class="fas fa-info-circle"></i> GPS não funcionou?</strong></p>
         ${instrucao}
-        <p style="margin-top:6px">Marque a opção abaixo para combinar o frete pelo WhatsApp.</p>
-        <label style="display:flex;align-items:center;gap:10px;margin-top:8px;cursor:pointer;">
+        <p style="margin-top:8px;font-size:0.85rem;color:#27ae60"><strong>Frete mínimo aplicado: Gs ${freteMinimo.toLocaleString("es-PY")}</strong></p>
+        <p style="margin-top:6px;font-size:0.85rem;color:#e67e22">⚠️ O valor do delivery pode aumentar caso o endereço de entrega seja mais distante do que a faixa mínima. Nesse caso, a diferença será combinada na entrega.</p>
+        <label style="display:flex;align-items:center;gap:10px;margin-top:10px;cursor:pointer;">
           <input type="checkbox" id="check-sem-gps" style="width:20px;height:20px;">
           <span data-lang-key="gps-erro-check">Enviaré mi ubicación por WhatsApp</span>
         </label>`;
       boxErro.style.display = "block";
-      btn.innerText = "📍 Tentar Novamente";
-      btn.disabled = false;
+      btn.innerText = "✅ Frete mínimo aplicado";
+      btn.disabled = true;
+      atualizarTotalCheckout();
     },
     { timeout: 12000, maximumAge: 60000, enableHighAccuracy: true },
   );
@@ -3754,6 +3493,7 @@ async function enviarZap() {
   if (
     modoEntrega === "delivery" &&
     !localCliente &&
+    !_freteResolvidoSemGps &&
     !document.getElementById("check-sem-gps")?.checked
   ) {
     alert(
