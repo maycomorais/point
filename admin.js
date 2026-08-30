@@ -1245,7 +1245,7 @@ async function carregarPedidos(silencioso = false) {
       tbody.innerHTML += `
                 <tr style="${linhaCor}">
                     <td style="text-align:center; vertical-align: middle;">${checkbox}</td>
-                    <td><strong>${p.id}</strong></td>
+                    <td><strong>${p.uid_temporal || p.id}</strong></td>
                     <td>
                         <div style="font-weight:bold">${p.cliente_nome || "Cliente"}</div>
                         <div style="font-size:0.8rem; color:#666">${p.endereco_entrega || ""}</div>
@@ -1348,7 +1348,7 @@ async function carregarPedidos(silencioso = false) {
                     <div style="background:${cardBg}; border-radius:10px; padding:14px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); border-left:4px solid ${p.status === "pendente" ? "#f59e0b" : p.status === "pronto_entrega" ? "#22c55e" : p.status === "saiu_entrega" ? "#3498db" : "#94a3b8"};">
                         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
                             <div>
-                                <div style="font-weight:700;font-size:1rem">${p.id} — ${p.cliente_nome || "Cliente"}</div>
+                                <div style="font-weight:700;font-size:1rem">${p.uid_temporal || p.id} — ${p.cliente_nome || "Cliente"}</div>
                                 <div style="font-size:0.78rem;color:#666;margin-top:2px">${p.endereco_entrega || (p.tipo_entrega === "balcao" ? "🏪 Balcão" : "")}</div>
                             </div>
                             <span class="status-badge st-${p.status}" style="font-size:0.7rem">${statusLabel}</span>
@@ -1555,7 +1555,7 @@ async function imprimirPedido(id) {
   if (!p) return;
 
   const dados = {
-    id: p.id,
+    id: p.uid_temporal || p.id,
     cliente: { nome: p.cliente_nome, tel: p.cliente_telefone },
     entrega: { tipo: p.tipo_entrega, ref: p.endereco_entrega },
     // Imprime apenas itens pendentes (sem status ou status 'pendente')
@@ -11319,7 +11319,7 @@ async function salvarPedidoBalcao() {
   if (novoPedido?.id) {
     // Monta dados direto (sem segunda busca no banco)
     const dadosImpressao = {
-      id: novoPedido.id,
+      id: novoPedido.uid_temporal || novoPedido.id,
       cliente: { nome: nomeFinal, tel: tel },
       entrega: { tipo: tipoEntregaPDV, ref: pedido.endereco_entrega },
       itens: novosItens.map((i) => ({
