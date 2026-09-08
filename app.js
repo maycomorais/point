@@ -720,6 +720,10 @@ async function renderMenu() {
   const minAgora = agora.getHours() * 60 + agora.getMinutes();
 
   function categoriaVisivel(cat) {
+    // Filtro por dia da semana (0=Dom...6=Sáb, igual ao Date.getDay())
+    if (Array.isArray(cat.dias_semana) && cat.dias_semana.length > 0) {
+      if (!cat.dias_semana.includes(agora.getDay())) return false;
+    }
     if (!cat.hora_inicio || !cat.hora_fim) return true;
     const [hI, mI] = cat.hora_inicio.split(":").map(Number);
     const [hF, mF] = cat.hora_fim.split(":").map(Number);
@@ -784,7 +788,8 @@ async function renderMenu() {
             <div class="prod-desc">${item.desc || ""}</div>
             <div class="prod-price">${precoLabel}</div>
         </div>
-        <img src="${img}" class="prod-img">
+        <img src="${img}" class="prod-img" loading="lazy" decoding="async"
+             onerror="this.onerror=null;this.src='https://cdn-icons-png.flaticon.com/512/2252/2252075.png'">
     `;
     return div;
   }
