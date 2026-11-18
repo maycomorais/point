@@ -13,7 +13,7 @@ const ADMIN_LANGS = {
   // ══════════════════════════════════════════════════════════
   pt: {
     'pdv.lancar_pedido': 'Lançar Pedido',
-
+    'pdv.baixar': 'Baixar Item',
     // ── Sidebar ────────────────────────────────────────────
     'sidebar.visao':        'Visão',
     'sidebar.pdv':          'PDV Balcão',
@@ -114,7 +114,7 @@ const ADMIN_LANGS = {
     'pdv.mesas_andamento':  'Pedidos em Andamento',
     'pdv.entregar':         'Entregar / Baixar',
     'pdv.na_cozinha':       '🔥 Na Cozinha',
-    'pdv.taxa_servico_label': 'Taxa de Serviço',
+
     // ── Financeiro ─────────────────────────────────────────
     'fin.title':            '💰 Controle Financeiro',
     'fin.faturamento':      'Faturamento',
@@ -348,6 +348,7 @@ const ADMIN_LANGS = {
     'pdv.buscar_produto':   '🔍 Buscar produto...',
     'pdv.cashback_disponivel': 'Cashback disponível',
     'pdv.usar_cashback':    'Usar cashback',
+    'pdv.taxa_servico_label': 'Taxa de Serviço',
 
     // ── CRM ────────────────────────────────────────────────────────
     'crm.title':            '🤝 CRM Clientes',
@@ -865,7 +866,7 @@ const ADMIN_LANGS = {
     'mesas.pendente_plural': 'pendientes',
     'mesas.total': 'Total',
     'mesas.status_pendente': 'PENDIENTE',
-    'pdv.taxa_servico_label': 'Taja de Servicio',
+
     'mesas.abrir_comanda': 'Abrir Comanda',
     'mesas.finalizar': 'Finalizar',
     'mesas.pendente_singular': 'pendiente',
@@ -928,6 +929,8 @@ const ADMIN_LANGS = {
     'pdv.mesas_andamento':  'Pedidos en Curso',
     'pdv.entregar':         'Entregar / Cerrar',
     'pdv.na_cozinha':       '🔥 En Cocina',
+    'pdv.baixar':           'Bajar Iten',
+
 
     // ── Financeiro ─────────────────────────────────────────
     'fin.title':            '💰 Control Financiero',
@@ -1138,6 +1141,7 @@ const ADMIN_LANGS = {
     'geral.hoje':           'Hoy',
 
     // ── PDV (chaves faltando) ──────────────────────────────────────
+    'pdv.taxa_servico_label': 'Propina',
     'pdv.novo_pedido':      'Nuevo Pedido',
     'pdv.tipo_balcao':      'Mostrador',
     'pdv.tipo_delivery':    'Delivery',
@@ -1678,21 +1682,51 @@ function applyAdminI18n() {
 
 // Troca idioma e re-aplica
 function setAdminLang(lang) {
-  if (!ADMIN_LANGS[lang]) return;
+  if (!ADMIN_LANGS[lang]) {
+    console.warn('[i18n] Idioma inválido:', lang);
+    return;
+  }
+
   _adminLang = lang;
-  localStorage.setItem('admin_lang', lang);
-  applyAdminI18n();
-  // Atualiza botões do seletor
-  document.querySelectorAll('.lang-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.lang === lang);
+  try { localStorage.setItem('admin_lang', lang); } catch (_) {}
+
+  // 1) Aplica traduções — protegido contra erro pra não impedir a marcação dos botões
+  try {
+    applyAdminI18n();
+  } catch (err) {
+    console.error('[i18n] applyAdminI18n falhou:', err);
+  }
+
+  // 2) Marca botão ativo — com estilos inline (à prova de CSS quebrado)
+  const btns = document.querySelectorAll('.lang-btn');
+  btns.forEach(btn => {
+    const btnLang = btn.dataset.lang || btn.getAttribute('data-lang');
+    const isActive = String(btnLang) === String(lang);
+
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+    // Fallback visual forte (independe de CSS externo)
+    btn.style.background = isActive ? '#ffffff' : 'rgba(255,255,255,0.12)';
+    btn.style.color      = isActive ? '#1a7a2e'  : 'rgba(255,255,255,0.7)';
+    btn.style.boxShadow  = isActive ? '0 0 0 2px rgba(255,255,255,0.35)' : 'none';
   });
+
+  console.log(`[i18n] Idioma alterado para: ${lang} (${btns.length} botão(ões) atualizado(s))`);
 }
 
 // Auto-aplica ao carregar
 document.addEventListener('DOMContentLoaded', () => {
-  applyAdminI18n();
-  // Marca botão ativo
+  // Aplica traduções iniciais
+  try { applyAdminI18n(); } catch (e) { console.error('[i18n] init:', e); }
+
+  // Marca o botão do idioma atual (fallback duplo)
   document.querySelectorAll('.lang-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.lang === _adminLang);
+    const btnLang = btn.dataset.lang || btn.getAttribute('data-lang');
+    const isActive = String(btnLang) === String(_adminLang);
+    btn.classList.toggle('active', isActive);
+    btn.style.background = isActive ? '#ffffff' : 'rgba(255,255,255,0.12)';
+    btn.style.color      = isActive ? '#1a7a2e'  : 'rgba(255,255,255,0.7)';
+    btn.style.boxShadow  = isActive ? '0 0 0 2px rgba(255,255,255,0.35)' : 'none';
   });
 });
