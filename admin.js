@@ -1286,6 +1286,7 @@ let _pedidosPagTotal = 0;
 let _pedidosPagFiltroAtivo = false; // true = sem filtro de data (usuário escolheu "Todos")
 
 async function carregarPedidos(silencioso = false, pagina = null) {
+  // === TRAVA DE SEGURANÇA (Para não limpar seleção) ===
   if (silencioso) {
     const selecionados = document.querySelectorAll(".check-pedido:checked");
     if (selecionados.length > 0) return;
@@ -1295,6 +1296,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     _pedidosPaginaAtual = pagina;
   }
 
+  // 1. Som e Notificação
   const { count, error: countError } = await supa
     .from("pedidos")
     .select("id", { count: "exact", head: true })
@@ -1308,6 +1310,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     if (typeof pararAlarme === "function") pararAlarme();
   }
 
+  // 2. AUTO-CONFIRM: pedidos saiu_entrega há mais de 4h
   try {
     const _corte4h = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const { data: _paraAuto } = await supa
@@ -1317,13 +1320,11 @@ async function carregarPedidos(silencioso = false, pagina = null) {
       .lt("tempo_saiu_entrega", _corte4h);
     if (_paraAuto && _paraAuto.length > 0) {
       const _ids = _paraAuto.map((p) => p.id);
-      await supa
-        .from("pedidos")
-        .update({ status: "entregue", tempo_entregue: new Date().toISOString() })
-        .in("id", _ids);
+      await supa.from("pedidos").update({ status: "entregue", tempo_entregue: new Date().toISOString() }).in("id", _ids);
     }
   } catch (e) {}
 
+  // 3. Query paginada
   const from = _pedidosPaginaAtual * _PEDIDOS_PAGE_SIZE;
   const to   = from + _PEDIDOS_PAGE_SIZE - 1;
 
@@ -1333,7 +1334,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
       "id, uid_temporal, status, tipo_entrega, cliente_nome, cliente_telefone, " +
       "endereco_entrega, total_geral, frete_motoboy, cancelamento_solicitado, " +
       "cancelamento_motivo, cancelamento_solicitado_por, created_at, " +
-      "tempo_saiu_entrega, motoboy_id, itens, forma_pagamento, obs_pagamento, geo_lat, geo_lng", // <-- COLUNAS DEVOLVIDAS AQUI
+      "tempo_saiu_entrega, motoboy_id, itens, forma_pagamento, obs_pagamento, geo_lat, geo_lng",
       { count: "exact" }
     )
     .or("status.eq.pendente,status.eq.em_preparo,status.eq.pronto_entrega,status.eq.saiu_entrega")
@@ -1343,7 +1344,7 @@ async function carregarPedidos(silencioso = false, pagina = null) {
   if (!_pedidosPagFiltroAtivo) {
     const _corte = new Date();
     _corte.setHours(0, 0, 0, 0);
-    _corte.setDate(_corte.getDate() - 2);
+    _corte.setDate(_corte.getDate() - 2); // 2 dias atrás
     query = query.gte("created_at", _corte.toISOString());
   }
 
@@ -1362,11 +1363,15 @@ async function carregarPedidos(silencioso = false, pagina = null) {
     ? `<span style="background:#e74c3c;color:white;font-size:0.7rem;padding:2px 7px;border-radius:10px;margin-left:6px;vertical-align:middle;">CANC. PENDENTE</span>`
     : "";
 
+  // 4. Renderização
   if (pedidos && pedidos.length > 0) {
     pedidos.forEach((p) => {
       let acoes = "";
       let linhaCor = "";
       let checkbox = "";
+
+      const totalSeguro = Number(p.total_geral || 0); // <-- BLINDAGEM CONTRA ERROS
+      const freteSeguro = Number(p.frete_motoboy || 0); // <-- BLINDAGEM CONTRA ERROS
 
       const btnPrint = `<button class="btn btn-sm btn-info" onclick="imprimirPedido(${p.id})" title="Imprimir"><i class="fas fa-print"></i></button>`;
       const temSolicitacaoCancelamento = p.cancelamento_solicitado;
@@ -1385,15 +1390,9 @@ async function carregarPedidos(silencioso = false, pagina = null) {
         acoes = `
           ${btnPrint}
           <button class="btn btn-success btn-sm" onclick="mudarStatus(${p.id}, 'em_preparo')"><i class="fas fa-fire"></i> Cozinha</button>
-          ${
-            _podeCancel
-              ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
-              : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Sol. Cancelamento</button>`
-          }
+          ${_podeCancel ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>` : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Solicitar Cancelamento</button>`}
         `;
-      }
-
-      if (p.status === "em_preparo") {
+      } else if (p.status === "em_preparo") {
         linhaCor = "background-color: #fff8e6;";
         const _btnCancelPreparo = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
@@ -1401,33 +1400,16 @@ async function carregarPedidos(silencioso = false, pagina = null) {
             ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i></button>`
             : `<span style="font-size:0.72rem;color:#e67e22;font-weight:600">⏳ Cancel. Pendente</span>`;
         acoes = `${btnPrint} <button class="btn btn-sm" style="background:#e67e22;color:#fff" onclick="mudarStatus(${p.id}, 'pronto_entrega')"><i class="fas fa-check"></i> Pronto</button> ${_btnCancelPreparo}`;
-      }
-
-            if (p.status === "saiu_entrega") {
+      } else if (p.status === "saiu_entrega") {
         linhaCor = "background-color: #ddf0ff;";
-        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
-
         const _btnCancelSaiu = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
           : !temSolicitacaoCancelamento
             ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})" title="Solicitar cancelamento"><i class="fas fa-ban"></i> Cancelar</button>`
             : `<span style="font-size:0.72rem;color:#e67e22;font-weight:600">⏳ Cancel. Pendente</span>`;
-
-        // AQUI ESTÁ A CORREÇÃO: Adiciona a caixa de seleção para permitir reenvio
-        if (p.tipo_entrega === "delivery") {
-          checkbox = `<input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:20px; height:20px;">`;
-        }
-
-        acoes = `
-          ${btnPrint} 
-          <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button> 
-          <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick='enviarRotaZapIndividual("${jsonSeguro}")' title="Reenviar Zap para o Motoboy"><i class="fab fa-whatsapp"></i></button>
-          ${_btnCancelSaiu}
-        `;
+        acoes = `${btnPrint} <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button> ${_btnCancelSaiu}`;
       } else if (p.status === "pronto_entrega") {
         linhaCor = "background-color: #d4edda;";
-        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
-
         const btnCancelar = _podeCancel
           ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')" title="Cancelar"><i class="fas fa-times"></i></button>`
           : !temSolicitacaoCancelamento
@@ -1435,16 +1417,17 @@ async function carregarPedidos(silencioso = false, pagina = null) {
             : "";
 
         if (p.tipo_entrega === "delivery") {
+          const jsonSeguro = encodeURIComponent(JSON.stringify(p));
           checkbox = `<input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:20px; height:20px;">`;
-          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})" title="Avisar al cliente"><i class="fab fa-whatsapp"></i></button> <span style="color:#155724; font-weight:bold; font-size:0.9rem; margin-left:5px;"><i class="fas fa-motorcycle"></i> Aguardando Rota</span>`;
+          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button> <span style="color:#155724; font-weight:bold; font-size:0.9rem; margin-left:5px;"><i class="fas fa-motorcycle"></i> Aguardando Rota</span>`;
         } else {
           const icone = p.tipo_entrega === "balcao" ? "fa-store" : "fa-hand-holding";
-          const tipo  = p.tipo_entrega === "balcao" ? "BALCÃO" : "RETIRADA";
-          checkbox = `<div style="text-align:center; color:#e67e22; font-size:1.2rem"><i class="fas ${icone}" title="${tipo}"></i></div>`;
-          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})" title="Avisar"><i class="fab fa-whatsapp"></i></button> <button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})">Baixar</button>`;
+          checkbox = `<div style="text-align:center; color:#e67e22; font-size:1.2rem"><i class="fas ${icone}"></i></div>`;
+          acoes = `${btnPrint} ${btnCancelar} <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button> <button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})">Baixar</button>`;
         }
       }
 
+      // Tabela Desktop
       tbody.innerHTML += `
         <tr style="${linhaCor}">
           <td style="text-align:center; vertical-align: middle;">${checkbox}</td>
@@ -1456,12 +1439,103 @@ async function carregarPedidos(silencioso = false, pagina = null) {
           </td>
           <td><span class="status-badge st-${p.status}">${p.status.toUpperCase().replace("_", " ")}</span>
           ${temSolicitacaoCancelamento && _podeCancel ? badgeCancelPendente : ""}</td>
-          <td>Gs ${(p.total_geral || 0).toLocaleString("es-PY")}</td>
+          <td>Gs ${totalSeguro.toLocaleString("es-PY")}</td>
           <td class="actions-cell">${acoes}</td>
         </tr>`;
+
+      // Cards Mobile
+      if (cardsDiv) {
+        const statusLabel =
+          p.status === "pendente"       ? "🔔 Novo"
+          : p.status === "em_preparo"    ? "🔥 Na Cozinha"
+          : p.status === "pronto_entrega"? "✅ Pronto"
+          : p.status.replace("_", " ");
+        const cardBg =
+          p.status === "pendente"        ? "#fff3cd"
+          : p.status === "pronto_entrega"? "#d4edda"
+          : p.status === "saiu_entrega"  ? "#ddf0ff"
+          : "#fff";
+        const jsonSeguro = encodeURIComponent(JSON.stringify(p));
+        let cardAcoes = "";
+
+        if (p.status === "pendente") {
+          cardAcoes = `
+            <button class="btn btn-success btn-sm" onclick="mudarStatus(${p.id}, 'em_preparo')"><i class="fas fa-fire"></i> Cozinha</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_podeCancel ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>` : `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`}`;
+        } else if (p.status === "em_preparo") {
+          const _btnCancelPreparoCard = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : `<span style="font-size:0.7rem;color:#e67e22;font-weight:600">⏳ Pendente</span>`;
+          cardAcoes = `
+            <button class="btn btn-sm" style="background:#e67e22;color:#fff" onclick="mudarStatus(${p.id}, 'pronto_entrega')"><i class="fas fa-check"></i> Pronto</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_btnCancelPreparoCard}`;
+        } else if (p.status === "saiu_entrega") {
+          const _btnCancelSaiuCard = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : `<span style="font-size:0.7rem;color:#e67e22;font-weight:600">⏳ Pendente</span>`;
+          cardAcoes = `
+            <button class="btn btn-success btn-sm" onclick="confirmarEntregaFuncionario(${p.id})"><i class="fas fa-check-circle"></i> Confirmar</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i> Imprimir</button>
+            ${_btnCancelSaiuCard}`;
+        } else if (p.status === "pronto_entrega" && p.tipo_entrega === "balcao") {
+          const _btnCancelBalcao = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i> Cancelar</button>`
+              : "";
+          cardAcoes = `<button class="btn btn-success btn-sm" onclick="finalizarMesa(${p.id})"><i class="fas fa-check"></i> Entregar</button>
+            <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i></button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i></button>
+            ${_btnCancelBalcao}`;
+        } else if (p.status === "pronto_entrega") {
+          const _btnCancelPronto = _podeCancel
+            ? `<button class="btn btn-danger btn-sm" onclick="mudarStatus(${p.id}, 'cancelado')"><i class="fas fa-times"></i></button>`
+            : !temSolicitacaoCancelamento
+              ? `<button class="btn btn-warning btn-sm" onclick="solicitarCancelamento(${p.id})"><i class="fas fa-ban"></i></button>`
+              : "";
+          cardAcoes = `<label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:#155724;font-weight:600;">
+              <input type="checkbox" class="check-pedido" value="${jsonSeguro}" style="width:18px;height:18px;"> Incluir na Rota
+            </label>
+            <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="avisarClientePronto(${p.id})"><i class="fab fa-whatsapp"></i> Avisar</button>
+            <button class="btn btn-info btn-sm" onclick="imprimirPedido(${p.id})"><i class="fas fa-print"></i></button>
+            ${_btnCancelPronto}`;
+        }
+
+        const badgeCancelCard =
+          temSolicitacaoCancelamento && _podeCancel
+            ? `<div style="background:#fff0f0;border:1px solid #e74c3c;border-radius:6px;padding:6px 8px;font-size:0.75rem;color:#c0392b;margin-top:6px">
+                🚫 Cancel. solicitado: ${p.cancelamento_motivo || "-"}
+               </div>` : "";
+
+        cardsDiv.innerHTML += `
+          <div style="background:${cardBg}; border-radius:10px; padding:14px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.07); border-left:4px solid ${p.status === "pendente" ? "#f59e0b" : p.status === "pronto_entrega" ? "#22c55e" : p.status === "saiu_entrega" ? "#3498db" : "#94a3b8"};">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+              <div>
+                <div style="font-weight:700;font-size:1rem">${p.uid_temporal || p.id} — ${p.cliente_nome || "Cliente"}</div>
+                <div style="font-size:0.78rem;color:#666;margin-top:2px">${p.endereco_entrega || (p.tipo_entrega === "balcao" ? "🏪 Mostrador" : "")}</div>
+              </div>
+              <span class="status-badge st-${p.status}" style="font-size:0.7rem">${statusLabel}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <strong style="font-size:1rem;color:var(--dark)">Gs ${totalSeguro.toLocaleString("es-PY")}</strong>
+                ${freteSeguro > 0 ? `<div style="font-size:0.72rem;color:#27ae60;margin-top:2px">🛵 Motoboy: Gs ${freteSeguro.toLocaleString("es-PY")}</div>` : ""}
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${cardAcoes}</div>
+            </div>
+            ${badgeCancelCard}
+          </div>`;
+      }
     });
   } else {
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:20px; color:#999;">Ningún pedido activo.</td></tr>';
+    if (cardsDiv) cardsDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#aaa;font-size:0.95rem">Ningún pedido activo por el momento.</div>';
   }
 
   _renderPaginacaoPedidos();
@@ -17331,6 +17405,7 @@ async function verificarContratoAdmin(session) {
       .select("id")
       .eq("usuario_id", session.user.id)
       .eq("aceito", true)
+      .limit(1)
       .maybeSingle();
 
     if (!data) {
@@ -17458,20 +17533,22 @@ async function admAceitarContrato() {
       ip = (await r.json()).ip || "";
     } catch (_) {}
 
-    const { error } = await supa.from("contratos_aceites").insert([
-      {
-        usuario_id: session.user.id,
-        aceito: true,
-        nome_assinante: nome,
-        doc_assinante: doc,
-        ip_assinante: ip,
-        user_agent: navigator.userAgent,
-        aceito_em: new Date().toISOString(),
-      },
-    ]);
+    // CORREÇÃO: Adicionamos o campo 'email' que é obrigatório no banco
+    const payload = {
+      usuario_id: session.user.id,
+      email: session.user.email, 
+      aceito: true,
+      nome_assinante: nome,
+      doc_assinante: doc,
+      ip_assinante: ip,
+      user_agent: navigator.userAgent,
+      aceito_em: new Date().toISOString(),
+    };
+
+    const { error } = await supa.from("contratos_aceites").insert([payload]);
 
     if (error) {
-      // Pode já existir — tenta update
+      // Se já existir um contrato para este usuário, atualiza ao invés de falhar
       if (error.code === "23505" || error.message?.includes("duplicate")) {
         await supa
           .from("contratos_aceites")
@@ -17489,9 +17566,9 @@ async function admAceitarContrato() {
 
     const overlay = document.getElementById("contrato-admin-overlay");
     if (overlay) overlay.style.display = "none";
-    console.log("✅ Contrato aceptado con éxito.");
+    console.log("✅ Contrato aceito com sucesso.");
   } catch (e) {
-    alert("Error al registrar firma: " + e.message);
+    alert("Erro ao registrar firma: " + e.message);
     if (btn) {
       btn.disabled = false;
       btn.textContent = "✍️ ASSINAR E CONTINUAR";
